@@ -10,7 +10,7 @@ This is the reference for the module's inputs and outputs. For *why* it is shape
 
 ```hcl
 module "ai_gateway" {
-  source = "github.com/zuman88/azure-ai-gateway-cost-attribution//modules/ai-gateway"
+  source = "github.com/muazuisah/azure-ai-gateway-cost-attribution//modules/ai-gateway"
 
   resource_group_name = azurerm_resource_group.this.name
   location            = "eastus2"

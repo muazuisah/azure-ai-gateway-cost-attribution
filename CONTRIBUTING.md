@@ -16,7 +16,7 @@ You need:
 The Python test suite uses the standard library only — no virtualenv, no `pip install`. That is deliberate, and please keep it that way: a contributor should be able to clone and run the tests in one command.
 
 ```bash
-git clone https://github.com/zuman88/azure-ai-gateway-cost-attribution.git
+git clone https://github.com/muazuisah/azure-ai-gateway-cost-attribution.git
 cd azure-ai-gateway-cost-attribution
 python -m unittest discover -s tests
 ```

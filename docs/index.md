@@ -55,7 +55,7 @@ Per-request token accounting, turned into a number finance will accept.
 ## Source
 
 The Terraform, policies and examples live on GitHub:
-**[zuman88/azure-ai-gateway-cost-attribution](https://github.com/zuman88/azure-ai-gateway-cost-attribution)**
+**[muazuisah/azure-ai-gateway-cost-attribution](https://github.com/muazuisah/azure-ai-gateway-cost-attribution)**
 
 Three worked examples ship with it: a single-region quickstart, a production profile with private endpoints and multi-region backends, and a full chargeback deployment.
 

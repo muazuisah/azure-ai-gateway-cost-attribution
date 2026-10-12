@@ -7,11 +7,11 @@ Production-grade **Terraform** for the two things enterprise AI platforms need t
 
 The second builds on the first and is enabled by a single flag, so you can adopt the gateway now and turn on chargeback when finance asks.
 
-[![CI](https://github.com/zuman88/azure-ai-gateway-cost-attribution/actions/workflows/ci.yml/badge.svg)](https://github.com/zuman88/azure-ai-gateway-cost-attribution/actions/workflows/ci.yml)
+[![CI](https://github.com/muazuisah/azure-ai-gateway-cost-attribution/actions/workflows/ci.yml/badge.svg)](https://github.com/muazuisah/azure-ai-gateway-cost-attribution/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Terraform](https://img.shields.io/badge/terraform-%3E%3D1.9-623CE4)](https://developer.hashicorp.com/terraform)
 
-📖 **[Read the documentation site →](https://zuman88.github.io/azure-ai-gateway-cost-attribution/)** — architecture, policy reference, cost attribution, operations, and eight architecture decision records.
+📖 **[Read the documentation site →](https://muazuisah.github.io/azure-ai-gateway-cost-attribution/)** — architecture, policy reference, cost attribution, operations, and eight architecture decision records.
 
 ---
 
@@ -77,7 +77,7 @@ You also need quota for the Foundry model deployments you intend to create.
 ### Deploy
 
 ```bash
-git clone https://github.com/zuman88/azure-ai-gateway-cost-attribution.git
+git clone https://github.com/muazuisah/azure-ai-gateway-cost-attribution.git
 cd azure-ai-gateway-cost-attribution/examples/01-quickstart
 
 az login
@@ -280,7 +280,7 @@ Please report vulnerabilities as described in [SECURITY.md](SECURITY.md). Do not
 
 ## Author
 
-Built and maintained by **Muazu Isah**, Cloud Solution Architect at Microsoft — [@zuman88](https://github.com/zuman88).
+Built and maintained by **Muazu Isah**, Cloud Solution Architect at Microsoft — [@muazuisah](https://github.com/muazuisah).
 
 This grew out of repeated customer engagements where the same problems kept surfacing: a model name hard-coded into forty services, no way to answer which team spent what, and a gateway that worked until the day one region throttled. The patterns here are the ones that held up in production, written down so the next engagement starts further along.
 

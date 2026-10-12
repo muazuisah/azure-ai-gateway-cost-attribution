@@ -15,7 +15,7 @@ description: >-
   Azure OpenAI model deployments, with per-application cost attribution and
   chargeback reconciled against Azure Cost Management.
 
-url: https://zuman88.github.io
+url: https://muazuisah.github.io
 baseurl: /azure-ai-gateway-cost-attribution
 
 author: Muazu Isah

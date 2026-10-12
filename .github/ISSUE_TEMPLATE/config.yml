@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/zuman88/azure-ai-gateway-cost-attribution/security/advisories/new
+    url: https://github.com/muazuisah/azure-ai-gateway-cost-attribution/security/advisories/new
     about: Report privately. Please do not open a public issue for a security problem.
   - name: Azure API Management or Foundry service issue
     url: https://learn.microsoft.com/answers/tags/33/azure-api-management
     about: For problems with the Azure services themselves rather than this Terraform.
   - name: Question or idea
-    url: https://github.com/zuman88/azure-ai-gateway-cost-attribution/discussions
+    url: https://github.com/muazuisah/azure-ai-gateway-cost-attribution/discussions
     about: Open-ended questions and design discussion.

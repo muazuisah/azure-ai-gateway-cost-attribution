@@ -36,7 +36,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement by opening a report through [GitHub's private reporting](https://github.com/zuman88/azure-ai-gateway-cost-attribution/security/advisories/new) or by contacting the maintainer through their GitHub profile. All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement by opening a report through [GitHub's private reporting](https://github.com/muazuisah/azure-ai-gateway-cost-attribution/security/advisories/new) or by contacting the maintainer through their GitHub profile. All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 

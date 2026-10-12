@@ -4,7 +4,7 @@
 
 **Please do not open a public issue for a security problem.**
 
-Report privately through [GitHub Security Advisories](https://github.com/zuman88/azure-ai-gateway-cost-attribution/security/advisories/new). Include the affected module or policy, what an attacker gains, and a reproduction if you have one.
+Report privately through [GitHub Security Advisories](https://github.com/muazuisah/azure-ai-gateway-cost-attribution/security/advisories/new). Include the affected module or policy, what an attacker gains, and a reproduction if you have one.
 
 Expect an acknowledgement within 5 working days and an assessment within 10.
 
