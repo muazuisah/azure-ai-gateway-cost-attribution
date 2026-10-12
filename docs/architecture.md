@@ -445,6 +445,45 @@ The production profile (`examples/02-production-private`) applies:
 - Diagnostic settings to Log Analytics on every resource.
 - Optional Azure Front Door / Application Gateway WAF in front of the gateway for public-facing workloads.
 
+### Bringing your own network
+
+Very few organisations will let a workload deployment create its own virtual network, and the ones
+that do rarely let it create private DNS zones. So every network resource above is independently
+bring-your-own, decided by whether a field is left blank:
+
+| Field left blank | Field given a resource ID |
+| --- | --- |
+| `existing_virtual_network_id` — a virtual network is created | the named network is used, and subnets are still created inside it unless you supply those too |
+| `existing_apim_subnet_id` — a subnet is created, delegated and sized for the chosen tier | the named subnet is used exactly as it is |
+| `existing_private_endpoint_subnet_id` — a subnet is created with endpoint network policies enabled | the named subnet is used exactly as it is |
+| `existing_apim_nsg_id` — a network security group is created with the rules the tier requires | the named group is attached to the subnet created here |
+| `existing_private_endpoint_nsg_id` — a network security group is created that allows HTTPS from the VNet and denies the rest | the named group is attached instead |
+| `existing_private_dns_zone_ids` — all three zones are created and linked | the zones you name are reused, and **only the remainder are created** |
+
+The decisions are separate because the realistic hand-over is partial. A platform team commonly owns
+the zones and nothing else, or gives you an empty spoke and expects you to carve your own subnets in
+it. An all-or-nothing switch forces those teams to fork the module.
+
+Two rules keep this safe to use inside someone else's landing zone:
+
+**A supplied subnet is never modified.** No network security group is attached to it, no delegation,
+no NAT gateway. Those are properties of the subnet, and a workload deployment reaching into a
+platform team's resource to change them is how landing zones get broken. The consequence is that a
+subnet you supply has to arrive configured, so the two properties API Management cannot start without
+are checked at plan time instead: it must have a network security group, and on the v2 tiers it must
+be delegated to `Microsoft.Web/serverFarms`. `NetworkSecurityGroupNotFound` otherwise surfaces well
+into a thirty-minute apply.
+
+**A supplied DNS zone is never linked by default.** A central zone is normally linked to the spokes
+that need it already, and the deploying identity normally cannot write to its resource group anyway.
+`link_existing_private_dns_zones` turns it on for the case where you own the zones but keep them
+elsewhere.
+
+The module reports what it actually created in its `created_resources` output, and lists any Foundry
+zone that will neither be created nor was supplied in `missing_private_dns_zones` — that list being
+non-empty means private endpoints resolve inconsistently depending on the hostname used, which is
+exactly the failure that is hardest to attribute after the fact.
+
 ---
 
 ## 6. What this improves over a hand-rolled gateway

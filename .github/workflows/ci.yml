@@ -53,6 +53,32 @@ jobs:
             echo "::endgroup::"
           done
 
+  unit:
+    name: Terraform unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      # These run against a mocked provider, so they need no subscription, no
+      # credentials and no cost, and they finish in seconds. They cover the
+      # branches `validate` cannot see: which resources a given combination of
+      # bring-your-own inputs actually creates, and whether the guards fire.
+      - name: terraform test
+        run: |
+          set -euo pipefail
+          for dir in modules/networking
+          do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -no-color
+            terraform -chdir="$dir" test -no-color
+            echo "::endgroup::"
+          done
+
   policies:
     name: Policy templates render to valid XML
     runs-on: ubuntu-latest

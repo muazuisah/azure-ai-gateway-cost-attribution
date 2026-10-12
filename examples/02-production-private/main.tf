@@ -76,10 +76,20 @@ module "network" {
   apim_sku_name             = var.apim_sku_name
   apim_virtual_network_type = var.apim_virtual_network_type
 
-  # In a hub-and-spoke estate the zones are almost always owned centrally. Set this to false and pass
-  # existing_private_dns_zone_ids instead; a duplicate zone in a spoke breaks resolution estate-wide.
-  create_private_dns_zones      = var.create_private_dns_zones
-  existing_private_dns_zone_ids = var.existing_private_dns_zone_ids
+  # Bring your own, piece by piece. Anything left blank is created here; anything with a resource ID
+  # in it is used as it stands. In a hub-and-spoke estate the private DNS zones are almost always
+  # owned centrally - name them here, because a duplicate zone in a spoke breaks resolution
+  # estate-wide.
+  existing_virtual_network_id         = var.existing_virtual_network_id
+  existing_apim_subnet_id             = var.existing_apim_subnet_id
+  existing_private_endpoint_subnet_id = var.existing_private_endpoint_subnet_id
+  existing_apim_nsg_id                = var.existing_apim_nsg_id
+  existing_private_endpoint_nsg_id    = var.existing_private_endpoint_nsg_id
+
+  create_private_dns_zones        = var.create_private_dns_zones
+  existing_private_dns_zone_ids   = var.existing_private_dns_zone_ids
+  link_existing_private_dns_zones = var.link_existing_private_dns_zones
+  require_private_dns_coverage    = var.require_private_dns_coverage
 
   enable_nat_gateway = var.enable_nat_gateway
 }

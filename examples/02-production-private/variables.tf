@@ -82,15 +82,73 @@ variable "private_endpoint_subnet_address_prefix" {
 }
 
 variable "create_private_dns_zones" {
-  description = "Create the three Foundry private DNS zones here. Set false when a platform team owns them centrally."
+  description = "Override for the per-zone decision. Leave null to create only the zones not supplied below. False creates none at all, for estates where resolution is handled by a central resolver."
+  type        = bool
+  default     = null
+}
+
+variable "existing_private_dns_zone_ids" {
+  description = "Centrally owned private DNS zones, keyed by zone name. Decided per zone: name the ones that already exist and the rest are created."
+  type        = map(string)
+  default     = {}
+}
+
+variable "require_private_dns_coverage" {
+  description = "Fail the plan if the deployment would end up with no private DNS zone at all. Set false only when name resolution genuinely lives outside this deployment."
   type        = bool
   default     = true
 }
 
-variable "existing_private_dns_zone_ids" {
-  description = "Centrally owned private DNS zones, keyed by zone name. Required when create_private_dns_zones is false."
-  type        = map(string)
-  default     = {}
+variable "link_existing_private_dns_zones" {
+  description = "Link the zones named above to this virtual network. Usually unnecessary - a central zone is normally linked already - and usually not permitted from a workload deployment."
+  type        = bool
+  default     = false
+}
+
+# ---------------------------------------------------------------------------------------------------
+# Bring your own network
+#
+# Each of these is decided on its own. Leave one blank and this deployment creates that piece; supply
+# a resource ID and it uses what is already there. The realistic cases are the mixed ones: a platform
+# team hands over an empty spoke and expects the workload to carve its own subnets, or owns the
+# subnets as well and leaves you only what hangs off them.
+#
+# A supplied subnet is used exactly as it is. This deployment will not attach a network security
+# group, a delegation or a NAT gateway to a subnet it did not create - those are properties of the
+# subnet, and changing them on a platform team's resource from a workload deployment is how landing
+# zones get broken. Two things API Management cannot start without are checked while the plan is
+# still on screen: the subnet must have a network security group, and the v2 tiers need it delegated
+# to Microsoft.Web/serverFarms.
+# ---------------------------------------------------------------------------------------------------
+
+variable "existing_virtual_network_id" {
+  description = "Deploy into an existing virtual network. Leave blank to create one. Supplying it does not stop subnets being created in it."
+  type        = string
+  default     = null
+}
+
+variable "existing_apim_subnet_id" {
+  description = "Existing subnet for API Management. Leave blank to create one, sized and configured for the chosen tier."
+  type        = string
+  default     = null
+}
+
+variable "existing_private_endpoint_subnet_id" {
+  description = "Existing subnet for the Foundry private endpoints. Leave blank to create one."
+  type        = string
+  default     = null
+}
+
+variable "existing_apim_nsg_id" {
+  description = "Existing network security group for the API Management subnet. Leave blank to create one with the rules the chosen tier requires. Only used when this deployment creates the subnet."
+  type        = string
+  default     = null
+}
+
+variable "existing_private_endpoint_nsg_id" {
+  description = "Existing network security group for the private endpoint subnet. Leave blank to create one that allows HTTPS from the virtual network and denies the rest."
+  type        = string
+  default     = null
 }
 
 variable "enable_nat_gateway" {

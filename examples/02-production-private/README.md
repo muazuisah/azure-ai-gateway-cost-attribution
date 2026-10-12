@@ -51,7 +51,9 @@ Agents are capped hardest on purpose. An agent loop is the most effective way to
 - **`Microsoft.Authorization/roleAssignments/write`** on the resource group. The gateway grants its own identity `Cognitive Services User` on both Foundry accounts.
 - Both `primary_location` and `secondary_location` must carry all three models. Regional model availability is the most common reason this example fails on first apply.
 - **Network reachability.** Foundry has public access disabled and API Management may be internal, depending on `apim_virtual_network_type`. You need a path to it — a jumpbox, a VPN, ExpressRoute, or peering from wherever you test.
-- If your private DNS zones are owned centrally, set `create_private_dns_zones = false` and pass `existing_private_dns_zone_ids`. A duplicate zone in a spoke breaks resolution estate-wide, which is a much larger incident than a failed apply.
+- If your private DNS zones are owned centrally, name them in `existing_private_dns_zone_ids` and they will be reused rather than created. The decision is made per zone, so naming one and letting the other two be created is fine. A duplicate zone in a spoke breaks resolution estate-wide, which is a much larger incident than a failed apply.
+- The same applies to the rest of the network. `existing_virtual_network_id`, `existing_apim_subnet_id`, `existing_private_endpoint_subnet_id`, `existing_apim_nsg_id` and `existing_private_endpoint_nsg_id` are each decided on their own: leave one blank and it is created, fill it in and it is reused. Supplying the virtual network alone is the common case — subnets are still carved inside it unless you supply those too.
+- A subnet you supply is used exactly as it is. Nothing is attached to it, so it must already have a network security group, and on the v2 tiers it must be delegated to `Microsoft.Web/serverFarms`. Both are checked at plan time; without the check the first shows up as `NetworkSecurityGroupNotFound` well into the apply.
 
 ## Usage
 

@@ -11,21 +11,69 @@ publisher_email = "ai-platform@contoso.com"
 
 # ---------------------------------------------------------------------------------------------------
 # Network
+#
+# Every network resource below is bring-your-own, and the choice is made by leaving a field blank or
+# filling it in. Blank means "create this for me". A resource ID means "use this one". Each piece is
+# decided on its own, so a partial hand-over works - which is the normal case, because a platform
+# team rarely owns all of it or none of it.
+#
+# Addresses are only used for subnets this deployment creates.
 # ---------------------------------------------------------------------------------------------------
 address_space                          = "10.60.0.0/16"
 apim_subnet_address_prefix             = "10.60.1.0/27"
 private_endpoint_subnet_address_prefix = "10.60.2.0/24"
 
-# In a hub-and-spoke estate the private DNS zones are owned centrally. Set this to false and supply the
-# zone IDs below - creating a duplicate zone inside a spoke breaks name resolution across the landing
-# zone, and does so intermittently, which is worse.
-create_private_dns_zones = true
+# --- Virtual network, subnets, network security groups -------------------------------------------
+#
+# Leave all five blank for a self-contained deployment that creates its own network. That is the
+# default and what the walkthrough assumes.
+#
+# Supply the virtual network alone and this deployment carves its subnets inside it - the usual
+# arrangement when a platform team hands over an empty spoke.
+#
+# Supply the subnets as well and they are used exactly as they are. Nothing is attached to them: no
+# network security group, no delegation, no NAT gateway. Those are properties of the subnet, and a
+# workload deployment reaching into a platform team's resource to change them is how landing zones
+# get broken. Arrive with the subnet configured, because API Management will not start without a
+# network security group on it, and the v2 tiers need it delegated to Microsoft.Web/serverFarms.
+# Both are checked at plan time rather than thirty minutes into an apply.
+#
+# existing_virtual_network_id         = "/subscriptions/.../resourceGroups/platform-rg/providers/Microsoft.Network/virtualNetworks/spoke-ai-prod"
+# existing_apim_subnet_id             = "/subscriptions/.../resourceGroups/platform-rg/providers/Microsoft.Network/virtualNetworks/spoke-ai-prod/subnets/snet-apim"
+# existing_private_endpoint_subnet_id = "/subscriptions/.../resourceGroups/platform-rg/providers/Microsoft.Network/virtualNetworks/spoke-ai-prod/subnets/snet-privatelink"
 
+# Bring a corporate network security group but still let this deployment create the subnets. Only
+# consulted for subnets created here; a subnet you supplied keeps whatever it already has.
+#
+# existing_apim_nsg_id             = "/subscriptions/.../providers/Microsoft.Network/networkSecurityGroups/corp-apim-nsg"
+# existing_private_endpoint_nsg_id = "/subscriptions/.../providers/Microsoft.Network/networkSecurityGroups/corp-privatelink-nsg"
+
+# --- Private DNS ----------------------------------------------------------------------------------
+#
+# Decided per zone. Name the zones that already exist and the rest are created, so a hand-over of one
+# or two zones works without an all-or-nothing switch. In a hub-and-spoke estate these are almost
+# always central: creating a duplicate zone inside a spoke breaks name resolution across the whole
+# landing zone, and does so intermittently, which is worse. If you are not sure whether your platform
+# team owns them, assume they do and ask.
+#
 # existing_private_dns_zone_ids = {
 #   "privatelink.cognitiveservices.azure.com" = "/subscriptions/.../privateDnsZones/privatelink.cognitiveservices.azure.com"
 #   "privatelink.openai.azure.com"            = "/subscriptions/.../privateDnsZones/privatelink.openai.azure.com"
 #   "privatelink.services.ai.azure.com"       = "/subscriptions/.../privateDnsZones/privatelink.services.ai.azure.com"
 # }
+
+# A zone that is not linked to the virtual network resolves nothing from inside it. Zones created
+# here are linked automatically; supplied ones are left alone, because they are normally linked
+# already and a workload identity normally cannot write to them. Turn this on if you own the zones
+# but keep them in a different resource group.
+# link_existing_private_dns_zones = true
+
+# Set both of these only when name resolution genuinely lives somewhere this deployment cannot see -
+# a central resolver, or conditional forwarding from on-premises. Without a zone, clients inside the
+# network resolve the model endpoint to its public address and the private endpoints are never used:
+# the deployment looks healthy, the traffic is not private, and nothing reports an error.
+# create_private_dns_zones     = false
+# require_private_dns_coverage = false
 
 # Turn this on when a downstream endpoint allow-lists source addresses, or at volumes where SNAT port
 # exhaustion becomes a real failure mode.
