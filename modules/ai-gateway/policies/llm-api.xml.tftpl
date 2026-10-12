@@ -486,6 +486,15 @@
   </inbound>
 
   <backend>
+    <!-- Records that the request actually reached a model.
+
+         The semantic cache short-circuits this entire section, so the absence of this variable in
+         outbound is what identifies a cache hit. That distinction has to be made from control flow
+         because it cannot be made from the response: llm-semantic-cache-store keeps the backend's
+         body verbatim, usage block and all, so a replayed hit presents exactly the same token counts
+         as the call that originally produced it. Billing from those counts charges full price for a
+         model that was never invoked. -->
+    <set-variable name="backendCalled" value="@(true)" />
     <forward-request timeout="${forward_timeout_seconds}"
                      buffer-request-body="true"
                      buffer-response="${buffer_response}"
@@ -608,14 +617,32 @@
       - (int)context.Variables["cachedTokens"]
       - (int)context.Variables["cacheWriteTokens"]))' />
 
+%{ if enable_semantic_cache ~}
+    <!-- Served from the semantic cache, meaning no model was called and nothing was billed by Azure.
+         Derived from whether the backend section ran rather than from anything on the response,
+         because a replayed response is byte-identical to the one that was stored. -->
+    <set-variable name="cacheHit" value='@(!context.Variables.ContainsKey("backendCalled"))' />
+%{ else ~}
+    <!-- Semantic caching is disabled, so every response came from a model. Defined unconditionally so
+         that the ledger schema does not change shape with configuration - a query written against one
+         deployment has to keep working against another. -->
+    <set-variable name="cacheHit" value="@(false)" />
+%{ endif ~}
+
     <set-variable name="backendModel" value='@{
         var body = (JObject)context.Variables["responseBody"];
         return body["model"] == null ? (string)context.Variables["targetDeployment"] : body["model"].ToString();
     }' />
 
-    <!-- A usage block is absent when the response was served from cache, when a stream terminated
-         early, or when the client suppressed usage reporting. Flagging it lets the chargeback report
-         separate "free" from "unmeasured", which are very different things. -->
+    <!-- A usage block is absent when a stream terminated early or when the client suppressed usage
+         reporting. Flagging it lets the chargeback report separate "free" from "unmeasured", which
+         are very different things.
+
+         A semantic cache hit is NOT one of those cases, despite the intuition that a cached response
+         carries no usage. The stored body is replayed verbatim, usage block included, so a hit looks
+         fully measured and prices exactly like the call that populated the cache. That is why cache
+         hits are identified from control flow in the backend section rather than inferred here. -->
+
     <set-variable name="usageMeasured" value='@(((JObject)context.Variables["responseBody"])["usage"] != null)' />
 
 %{ if enable_cost_attribution ~}
@@ -681,7 +708,11 @@
 
     <set-variable name="contextTier" value='@(((JObject)context.Variables["resolvedRates"])["tier"].ToString())' />
 
-    <set-variable name="estimatedCostUSD" value='@{
+    <!-- What the tokens on this response are worth at the resolved rate card, whether or not a model
+         produced them. Kept separate from estimatedCostUSD because those two numbers diverge on a
+         semantic cache hit: the tokens are real and priceable, the charge is not. Keeping the
+         valuation lets the hit be reported as a saving instead of simply vanishing. -->
+    <set-variable name="modelledCostUSD" value='@{
         var rates = (JObject)context.Variables["resolvedRates"];
         if (rates["tier"].ToString() == "unpriced")
         {
@@ -706,6 +737,42 @@
           + ((int)context.Variables["completionTokens"]     / unit) * output;
 
         return cost;
+    }' />
+
+    <!-- What this consumer is actually charged. A semantic cache hit never reached a model, so Azure
+         billed nothing for it and passing on a charge would invent revenue that no invoice backs.
+         -1 is preserved as the unpriced sentinel rather than collapsing to zero, because "no rate
+         card" and "no charge" are different answers and only one of them needs fixing. -->
+    <set-variable name="estimatedCostUSD" value='@{
+        double modelled = (double)context.Variables["modelledCostUSD"];
+        if (modelled &lt; 0) { return -1.0; }
+        return (bool)context.Variables["cacheHit"] ? 0.0 : modelled;
+    }' />
+
+    <!-- What caching saved on this request, which is the number a FinOps review asks for and the only
+         one that justifies the cache's own cost. Two mechanisms produce it and both land here:
+
+         A semantic cache hit at the gateway avoids the call outright, so the saving is the full
+         modelled value of the response.
+
+         Prompt caching inside the model discounts part of the input instead, so the saving is the
+         spread between the full input rate and the cached rate over the tokens that were reused.
+
+         Cache writes are deliberately absent. A write is a real premium charge, already carried in
+         estimatedCostUSD, and netting it off here would hide the case this is meant to expose - a
+         cache that is written far more often than it is read is a cost, not a saving. -->
+    <set-variable name="costAvoidedUSD" value='@{
+        double modelled = (double)context.Variables["modelledCostUSD"];
+        if (modelled &lt; 0) { return 0.0; }
+        if ((bool)context.Variables["cacheHit"]) { return modelled; }
+
+        var rates = (JObject)context.Variables["resolvedRates"];
+        double unit        = rates["unit"]        == null ? 1000000.0 : (double)rates["unit"];
+        double input       = rates["input"]       == null ? 0.0       : (double)rates["input"];
+        double cachedInput = rates["cachedInput"] == null ? input     : (double)rates["cachedInput"];
+
+        double saved = ((int)context.Variables["cachedTokens"] / unit) * (input - cachedInput);
+        return saved > 0 ? saved : 0.0;
     }' />
 
     <set-variable name="pricingEffectiveDate" value='@{
@@ -767,6 +834,10 @@
            the scientific notation that "R" can emit and that a consumer of this field would then
            have to parse. -->
       <metadata name="estimatedCostUSD" value='@(((double)context.Variables["estimatedCostUSD"]).ToString("F8"))' />
+      <!-- Zero on a cache hit, so a report that sums estimatedCostUSD alone will show the cache as a
+           drop in spend with no explanation. costAvoidedUSD is where that difference went. -->
+      <metadata name="cacheHit" value='@(((bool)context.Variables["cacheHit"]).ToString())' />
+      <metadata name="costAvoidedUSD" value='@(((double)context.Variables["costAvoidedUSD"]).ToString("F8"))' />
       <metadata name="pricingEffectiveDate" value='@((string)context.Variables["pricingEffectiveDate"])' />
       <!-- Which rate card priced this request. "base" for a flat-rate model; a tier name such as
            "long" when input length pushed it into a higher band. Without this a long-context bill
@@ -790,7 +861,11 @@
          before the retention window closes or the audit trail is theatre. -->
     <log-to-eventhub logger-id="${audit_logger_name}">@{
         var ledger = new JObject();
-        ledger["schemaVersion"] = 1;
+        // 2 adds cacheHit and costAvoidedUSD, and changes what estimatedCostUSD means: a semantic
+        // cache hit is now zero rather than the full modelled price. That is a correction, but a
+        // consumer comparing totals across the upgrade will see spend drop without usage dropping,
+        // so the version has to move with it.
+        ledger["schemaVersion"] = 2;
         ledger["timestamp"] = DateTime.UtcNow.ToString("o");
         ledger["correlationId"] = (string)context.Variables["correlationId"];
         ledger["environment"] = "{{${environment_named_value}}}";
@@ -816,6 +891,8 @@
         ledger["reasoningTokens"] = (int)context.Variables["reasoningTokens"];
         ledger["totalTokens"] = (int)context.Variables["totalTokens"];
         ledger["estimatedCostUSD"] = (double)context.Variables["estimatedCostUSD"];
+        ledger["cacheHit"] = (bool)context.Variables["cacheHit"];
+        ledger["costAvoidedUSD"] = (double)context.Variables["costAvoidedUSD"];
         ledger["pricingEffectiveDate"] = (string)context.Variables["pricingEffectiveDate"];
         ledger["contextTier"] = (string)context.Variables["contextTier"];
         ledger["latencyMs"] = (DateTime.UtcNow - (DateTime)context.Variables["requestStart"]).TotalMilliseconds;
@@ -854,6 +931,16 @@
     <set-header name="x-ai-cached-tokens" exists-action="override">
       <value>@(((int)context.Variables["cachedTokens"]).ToString())</value>
     </set-header>
+    <!-- A caller that sees a zero cost needs to know whether it was cached or simply unpriced, and a
+         caller tuning its prompts for cache reuse needs the hit rate without waiting on a workbook. -->
+    <set-header name="x-ai-cache-hit" exists-action="override">
+      <value>@(((bool)context.Variables["cacheHit"]).ToString().ToLowerInvariant())</value>
+    </set-header>
+%{ if enable_cost_attribution ~}
+    <set-header name="x-ai-cost-avoided-usd" exists-action="override">
+      <value>@(((double)context.Variables["costAvoidedUSD"]).ToString("F8"))</value>
+    </set-header>
+%{ endif ~}
     <set-header name="x-ai-latency-ms" exists-action="override">
       <value>@(((DateTime.UtcNow - (DateTime)context.Variables["requestStart"]).TotalMilliseconds).ToString("F0"))</value>
     </set-header>

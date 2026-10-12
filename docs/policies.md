@@ -243,6 +243,12 @@ Semantic caching is off by default. It is the one component here that can
 change the *answers* your users receive, which is why
 [architecture.md](architecture.md) treats it as opt-in.
 
+A cache hit leaves no mark on the response. The stored body is replayed
+verbatim, `usage` block included, so a hit carries the same token counts as the
+call that populated it and is indistinguishable from a real completion by
+inspection alone. Billing from those counts would charge for a model that never
+ran, so the hit is detected from control flow instead — see §9.
+
 ### §5b — Backend authentication
 
 `authentication-managed-identity` acquires a token for the Cognitive Services
@@ -271,6 +277,23 @@ constructs the upstream path. The `<backend>` section contains a single
 response from the model is returned to the caller through the normal outbound
 path — including the metering and cost sections — rather than being diverted
 into `<on-error>`.
+
+It also sets one variable:
+
+```xml
+<backend>
+  <set-variable name="backendCalled" value="@(true)" />
+  <forward-request ... />
+</backend>
+```
+
+This is the cache-hit detector. A semantic cache hit skips the whole `<backend>`
+section, so the variable is absent on the outbound path and
+`!context.Variables.ContainsKey("backendCalled")` is a reliable, well-defined
+signal that no model was called. The alternatives — timing heuristics, response
+header sniffing — are guesses; this is a fact about the path the request took.
+It is what lets §11 charge zero for a cache hit rather than full price. Anything
+added inside `<backend>` must leave this in place.
 
 ### §10 — Usage extraction
 

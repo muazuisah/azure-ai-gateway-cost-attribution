@@ -121,6 +121,16 @@ $cases = @(
         }
     },
     @{
+        # Cost attribution on, semantic caching off. Cache-hit detection and the savings calculation
+        # live in the cost block but are fed by a variable the semantic-cache branch defines, so this
+        # is the permutation where that variable has to come from the fallback instead.
+        Name = 'llm-api-cost-no-cache'
+        Expr = New-LlmApiExpr @{
+            enable_semantic_cache                = 'false'
+            semantic_cache_embeddings_backend_id = '""'
+        }
+    },
+    @{
         # mode = "both": Entra validation on, subscription still required, no gateway-wide limit.
         Name = 'llm-api-entra-both'
         Expr = New-LlmApiExpr @{
@@ -229,6 +239,42 @@ foreach ($case in $cases) {
             Write-Host "       the allowed list is at https://learn.microsoft.com/azure/api-management/api-management-policy-expressions#CLR-types" -ForegroundColor DarkGray
             Write-Host "       for invariant number formatting just drop the culture argument - policy" -ForegroundColor DarkGray
             Write-Host "       expressions already format with the invariant culture." -ForegroundColor DarkGray
+            $failed++
+            continue
+        }
+
+        # Every context.Variables[...] read must have a matching writer somewhere in the SAME rendered
+        # document. This is a per-permutation check by necessity: the template is a web of feature
+        # flags, and it is easy to place a reader outside the conditional block that defines what it
+        # reads. The full-feature render then looks perfect while a narrower flag combination emits a
+        # policy that throws at runtime - and it throws per request, in outbound, after the model has
+        # already been paid for, which is close to the worst place to discover it.
+        #
+        # Writers are not only set-variable: several built-in policies declare a variable through their
+        # own attributes, so those count too.
+        $readNames = [regex]::Matches($stripped, 'context\.Variables\[\s*"([^"]+)"\s*\]') |
+            ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+        $writtenNames = @(
+            [regex]::Matches($stripped, '<set-variable\s+name\s*=\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
+            [regex]::Matches($stripped, 'output-token-variable-name\s*=\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
+            [regex]::Matches($stripped, '\bvariable-name\s*=\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
+        ) | Sort-Object -Unique
+
+        # ContainsKey is the sanctioned way to probe for a variable that legitimately may not exist,
+        # so a name reached only that way is not a missing writer.
+        $probedNames = [regex]::Matches($stripped, 'context\.Variables\.ContainsKey\(\s*"([^"]+)"\s*\)') |
+            ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+
+        $undefined = $readNames | Where-Object { $_ -notin $writtenNames -and $_ -notin $probedNames }
+        if ($undefined) {
+            Write-Host "[FAIL] $($case.Name): reads policy variables that this permutation never sets" -ForegroundColor Red
+            foreach ($name in $undefined) {
+                $line = ($strippedLines | Select-String -SimpleMatch "context.Variables[`"$name`"]" | Select-Object -First 1)
+                Write-Host "       $name$(if ($line) { ": $($line.Line.Trim())" })" -ForegroundColor Red
+            }
+            Write-Host "       rendered output written to $out"
+            Write-Host "       the reader is probably outside the %{ if } block that defines it - either" -ForegroundColor DarkGray
+            Write-Host "       gate the reader the same way, or give the variable a fallback in an else." -ForegroundColor DarkGray
             $failed++
             continue
         }
