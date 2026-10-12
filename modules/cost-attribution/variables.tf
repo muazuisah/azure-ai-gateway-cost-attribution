@@ -148,6 +148,54 @@ variable "unpriced_model_threshold" {
   default     = 1
 }
 
+variable "enable_cache_economics_alert" {
+  description = <<-EOT
+    Alert when caching costs a model more than it saves it.
+
+    Cache writes are billed at a premium and cache reads at a discount, so a workload whose prompts
+    vary too much to hit the cache pays the premium without collecting the discount. Turn this off if
+    caching is disabled, or if the gateway serves workloads where cold-cache periods are expected and
+    the noise is unwelcome.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "cache_economics_minimum_requests" {
+  description = <<-EOT
+    Requests a model must serve in a day before its cache economics are judged.
+
+    Populating a cache necessarily happens before reading it, so any small sample taken around a cold
+    start looks net-negative. This suppresses that.
+  EOT
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.cache_economics_minimum_requests >= 1
+    error_message = "cache_economics_minimum_requests must be at least 1."
+  }
+}
+
+variable "cache_write_premium_usd_per_million" {
+  description = <<-EOT
+    Assumed extra cost, per million tokens, of writing to the prompt cache rather than sending the
+    same tokens as ordinary input. Used only to judge whether caching is paying for itself.
+
+    This is a single estimate applied across models because the ledger records how many tokens were
+    written to cache, not which rate card priced them. The alert it feeds turns on whether a ratio is
+    above or below one, so an approximation is sufficient; raise it if the models behind this gateway
+    charge more for cache writes than the default assumes.
+  EOT
+  type        = number
+  default     = 0.25
+
+  validation {
+    condition     = var.cache_write_premium_usd_per_million >= 0
+    error_message = "cache_write_premium_usd_per_million cannot be negative."
+  }
+}
+
 variable "unmeasured_usage_threshold_percent" {
   description = <<-EOT
     Percentage of successful requests with no usage block that triggers an alert.

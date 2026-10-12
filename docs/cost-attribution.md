@@ -49,8 +49,10 @@ The source rows are Application Insights `traces` where `message startswith "llm
 | `statusCode` | Response status. |
 | `streaming` | Whether the client asked for a streamed response. |
 | `usageMeasured` | Whether the response carried a `usage` block at all. The difference between "free" and "unmeasured". |
-| `promptTokens`, `cachedTokens`, `completionTokens`, `totalTokens` | The token counters the cost expression is built from. |
-| `estimatedCostUSD` | Full-precision estimate, or `-1` for an unpriced model. |
+| `promptTokens`, `billablePromptTokens`, `cachedTokens`, `cacheWriteTokens`, `completionTokens`, `reasoningTokens`, `totalTokens` | The token counters the cost expression is built from. `billablePromptTokens` is `promptTokens` less the cached and cache-write counts, because those three are priced at different rates; recomputing spend from `promptTokens` alone will not reconcile. |
+| `estimatedCostUSD` | What the consumer is charged. Full precision, `0` for a semantic cache hit, `-1` for an unpriced model. |
+| `cacheHit` | Whether the gateway answered from its semantic cache without calling a model. |
+| `costAvoidedUSD` | What caching saved on this request. Coalesced to `0` for traces emitted before the field existed. |
 | `contextTier` | Which rate card priced the request: `base`, or a tier name such as `long`. Defaulted to `base` for traces emitted before context tiers existed. |
 
 ### `consumer` is the chargeback key
@@ -69,7 +71,7 @@ Why the identity matters as much as the arithmetic is [ADR-0007](decisions/0007-
 
 ### What the trace carries but the projection does not
 
-The trace emits more than `local.ledger_query` projects: `billablePromptTokens`, `cacheWriteTokens`, `reasoningTokens`, `backendModel`, `apiId`, `operationId`, `pricingEffectiveDate`, `latencyMs` and `schemaVersion`. They are present in `customDimensions` and some are used directly by workbook tiles — the token-efficiency table reads `reasoningTokens`, the pricing-age tile reads `pricingEffectiveDate`. If you write your own query and need one of them, extend it yourself rather than assuming the shared projection already has it.
+The trace emits more than `local.ledger_query` projects: `backendModel`, `backendRegion`, `apiId`, `operationId`, `pricingEffectiveDate` and `latencyMs`. They are present in `customDimensions` and some are used directly by workbook tiles — the pricing-age tile reads `pricingEffectiveDate`. If you write your own query and need one of them, extend it yourself rather than assuming the shared projection already has it.
 
 ---
 
@@ -153,6 +155,16 @@ The only alert that reads a metric rather than a log: `Total Tokens` in the `met
 
 **What it means:** token consumption is running away *now*. Every other alert here is a log query on an hourly cadence, and a runaway agent loop can spend a great deal of money inside an hour. This is the fast signal, and it is aggregate by nature — it tells you something is burning, not who.
 
+### `cache_economics` — severity 3, optional but on by default
+
+Runs hourly over a trailing day, per `modelAlias`. Compares what caching returned (`costAvoidedUSD`) against an estimate of what populating the cache cost (`cacheWriteTokens` priced at `cache_write_premium_usd_per_million`, default `0.25`). Fires when the difference is negative. Models serving fewer than `cache_economics_minimum_requests` (default 100) in the window are skipped.
+
+**What it means:** caching is losing money on that model. Prompt text is varying just enough to miss the cache on nearly every request while still paying the cache-write premium on the way through. The usual causes are a timestamp, a session id or a random greeting injected into the system prompt — anything that makes each prompt unique defeats the cache completely while costing extra for the privilege.
+
+Move the volatile part of the prompt after the stable part, or turn caching off for that model. The alert is per model rather than per gateway on purpose: one badly behaved workload can be net-negative while the estate overall still benefits, and an aggregate would hide exactly the case worth finding.
+
+The premium is a single assumed figure across all models because the ledger records how many tokens were written to cache, not which rate card priced them. That is deliberate — this alert answers "is this cache worth having", which turns on the sign of a subtraction, not on a precise figure. Raise `cache_write_premium_usd_per_million` if the models behind the gateway charge more than the default assumes, or set `enable_cache_economics_alert = false` if caching is off.
+
 ### There is no variance alert
 
 The README and [architecture §4.5](architecture.md#45-what-the-customer-actually-sees) describe an alert on estimate-versus-actual variance. **No such rule exists in `modules/cost-attribution`.** Variance is surfaced in the workbook, as the gap between the `Estimated USD` and `Allocated USD` columns of the allocation table, and it is a gap a human has to look at. Alerting on it is roadmap, and it is not a small change: the actual figure is a manually entered workbook parameter, so there is nothing for an alert rule to query until an automated Cost Management export exists.
@@ -185,6 +197,56 @@ traces
 ```
 
 One further guard sits upstream: `enable_cost_attribution = true` with an empty `pricing_map` fails the plan, because every single request would otherwise be unpriced.
+
+---
+
+## 5b. Caching, and why a cache hit is not free to measure
+
+Two different mechanisms reduce what a request costs, they work at different layers, and conflating them produces a report nobody can defend.
+
+**Prompt caching happens inside the model.** The request still runs and still reaches a deployment. Some portion of the input was recognised as a prefix the model had already processed, so those tokens are billed at a reduced `cachedInput` rate instead of the full `input` rate. The ledger reports them as `cachedTokens`, and the saving is the spread between the two rates.
+
+**Semantic caching happens at the gateway.** `llm-semantic-cache-lookup` finds a sufficiently similar earlier prompt and returns that response directly. No model is called. Azure bills nothing.
+
+### The trap
+
+A semantic cache hit is not obviously a cache hit by the time cost attribution sees it.
+
+`llm-semantic-cache-store` keeps the backend's response body verbatim — including its `usage` block. When that body is replayed, it presents exactly the same `prompt_tokens` and `completion_tokens` as the call that originally produced it. There is no field on the response that says "this came from a cache". A cost expression reading those counters will price the request at full rate and charge a consumer for a model that never ran.
+
+So the hit is detected from control flow instead. The `<backend>` section sets a variable:
+
+```xml
+<backend>
+  <set-variable name="backendCalled" value="@(true)" />
+  <forward-request ... />
+</backend>
+```
+
+A semantic cache hit skips that section entirely, so in outbound the absence of the variable is the signal:
+
+```csharp
+cacheHit = !context.Variables.ContainsKey("backendCalled")
+```
+
+This is why `cacheHit` is derived where it is, and why it cannot be inferred from `usageMeasured` — a cache hit looks fully measured, because it is.
+
+### What gets recorded
+
+| Field | On a semantic cache hit | On a prompt-cached request |
+| --- | --- | --- |
+| `estimatedCostUSD` | `0` — nothing was billed | The real cost, with cached tokens at the discounted rate |
+| `costAvoidedUSD` | The full modelled value of the response | `cachedTokens × (input − cachedInput)` |
+| `cacheHit` | `true` | `false` |
+| `usageMeasured` | `true` — the replayed body has a `usage` block | `true` |
+
+`costAvoidedUSD` deliberately excludes cache *writes*. A write is a real premium charge and is already inside `estimatedCostUSD`; netting it off here would hide the failure mode that `cache_economics` exists to catch. Savings and the cost of producing them are kept apart so the two can be compared.
+
+Response headers `x-ai-cache-hit` and `x-ai-cost-avoided-usd` carry the same two values back to the caller, so a team tuning prompts for cache reuse can measure the effect without waiting on a workbook.
+
+### Consequences for reporting
+
+Summing `estimatedCostUSD` alone across the upgrade to ledger `schemaVersion` 2 will show spend falling while usage holds steady. That is the correction working, not a data loss. To reconstruct what the traffic *would* have cost, sum `estimatedCostUSD + costAvoidedUSD`.
 
 ---
 
@@ -275,6 +337,10 @@ Two things to understand before relying on it. It lives on the gateway module, n
 **PTU capacity breaks the per-token story at the source.** Reserved capacity is paid for whether or not anyone uses it. Ratio allocation still divides the real figure correctly, but "cost per token" for a month with idle PTU capacity is an average over an amount that was never per-token to begin with.
 
 **The estimate still has to be maintained.** Ratio allocation is immune to pricing drift, but the variance signal that tells anyone the pricing map has gone stale is computed *from* the estimate. Letting the rates rot does not corrupt the chargeback numbers — it blinds the mechanism that was supposed to warn you.
+
+**The `Total Tokens` metric does not know about cache hits.** `llm-emit-token-metric` is declared in the inbound section, before the request reaches — or skips — the backend, and it derives its counts from the response. A semantic cache hit replays a response complete with its `usage` block, so those tokens are likely counted in the metric even though no model processed them. The *ledger* is correct, because `cacheHit` is resolved on the outbound path where the answer is known; the metric is a near-real-time signal that cannot see the same thing in time. Practical effect: `token_burn_rate` may count cached traffic toward its ceiling. Treat the metric as "throughput through the gateway" and the ledger as "what was consumed at a model", and reconcile against the ledger whenever the two disagree.
+
+**The cache-write premium is assumed, not measured.** `cache_economics` prices cache writes from a single configurable figure across every model, because the ledger records how many tokens were written to cache but not which rate card priced them. It is sufficient for deciding whether a cache is worth keeping; it is not a number to put in an invoice.
 
 ---
 

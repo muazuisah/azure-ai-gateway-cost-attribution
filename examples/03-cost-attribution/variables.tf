@@ -181,6 +181,18 @@ variable "unmeasured_usage_threshold_percent" {
   default     = 5
 }
 
+variable "enable_cache_economics_alert" {
+  description = "Alert when a model's cache writes cost more than its cache hits save. Writing to a prompt cache is billed at a premium, so a workload whose prompts vary too much to hit the cache pays extra for a cache it never reads."
+  type        = bool
+  default     = true
+}
+
+variable "cache_write_premium_usd_per_million" {
+  description = "Assumed extra cost per million tokens of writing to the prompt cache rather than sending the same tokens as plain input. Used only to judge whether caching pays for itself, not for billing."
+  type        = number
+  default     = 0.25
+}
+
 variable "enable_eventhub_audit" {
   description = "Stream every request out unsampled for audit-grade chargeback."
   type        = bool

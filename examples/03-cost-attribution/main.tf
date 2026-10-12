@@ -121,4 +121,7 @@ module "cost_attribution" {
   daily_spend_threshold_usd          = var.daily_spend_threshold_usd
   token_rate_alert_threshold         = var.token_rate_alert_threshold
   unmeasured_usage_threshold_percent = var.unmeasured_usage_threshold_percent
+
+  enable_cache_economics_alert        = var.enable_cache_economics_alert
+  cache_write_premium_usd_per_million = var.cache_write_premium_usd_per_million
 }

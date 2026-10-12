@@ -69,14 +69,18 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "traces\n| where message startswith \"llm.request\"\n| extend\n    product = tostring(customDimensions[\"product\"]),\n    totalTokens = toint(customDimensions[\"totalTokens\"]),\n    estimatedCostUSD = todouble(customDimensions[\"estimatedCostUSD\"])\n| where \"*\" in ({Product}) or product in ({Product})\n| summarize\n    Requests = count(),\n    Tokens = sum(totalTokens),\n    [\"Estimated USD\"] = round(sum(iff(estimatedCostUSD > 0, estimatedCostUSD, 0.0)), 2),\n    Consumers = dcount(iff(isempty(tostring(customDimensions[\"consumerId\"])), tostring(customDimensions[\"subscriptionId\"]), tostring(customDimensions[\"consumerId\"]))),\n    Models = dcount(tostring(customDimensions[\"modelAlias\"]))",
+        "query": "traces\n| where message startswith \"llm.request\"\n| extend\n    product = tostring(customDimensions[\"product\"]),\n    totalTokens = toint(customDimensions[\"totalTokens\"]),\n    estimatedCostUSD = todouble(customDimensions[\"estimatedCostUSD\"]),\n    costAvoidedUSD = coalesce(todouble(customDimensions[\"costAvoidedUSD\"]), 0.0)\n| where \"*\" in ({Product}) or product in ({Product})\n| summarize\n    Requests = count(),\n    Tokens = sum(totalTokens),\n    [\"Estimated USD\"] = round(sum(iff(estimatedCostUSD > 0, estimatedCostUSD, 0.0)), 2),\n    [\"Saved by cache USD\"] = round(sum(costAvoidedUSD), 2),\n    Consumers = dcount(iff(isempty(tostring(customDimensions[\"consumerId\"])), tostring(customDimensions[\"subscriptionId\"]), tostring(customDimensions[\"consumerId\"]))),\n    Models = dcount(tostring(customDimensions[\"modelAlias\"]))",
         "size": 4,
         "queryType": 0,
         "resourceType": "microsoft.insights/components",
         "visualization": "tiles",
         "tileSettings": {
           "showBorder": true,
-          "titleContent": { "columnMatch": "Requests", "formatter": 12 }
+          "titleContent": { "columnMatch": "Estimated USD", "formatter": 12 },
+          "subtitleContent": { "columnMatch": "Saved by cache USD" },
+          "leftContent": { "columnMatch": "Requests" },
+          "rightContent": { "columnMatch": "Tokens" },
+          "bottomContent": { "columnMatch": "Consumers" }
         }
       },
       "name": "headline"
@@ -140,21 +144,23 @@
     },
     {
       "type": 1,
-      "content": { "json": "## Token efficiency\n\nCached input tokens cost a fraction of fresh input tokens, so a rising cache-hit share is a genuine saving rather than an accounting artefact. Reasoning tokens are already counted inside completion tokens and are broken out here only to show where completion spend is going \u2014 they are never added twice." },
+      "content": { "json": "## Token efficiency\n\n**Caching saves money two different ways and this table separates them.** *Cache hit rate* is the share of requests the gateway answered from its own semantic cache without calling a model at all \u2014 those cost nothing and are recorded as zero spend. *Prompt cache share* is the share of input tokens the model itself served from its prompt cache at a discounted rate; the request still ran, it was just cheaper.\n\n*Saved USD* adds both together: the full value of every cached response, plus the discount earned on reused input tokens. It is the number to quote when asked what caching is worth.\n\n**Watch the *Cache writes* column.** Writing to a prompt cache is charged at a premium over ordinary input. A model with heavy cache writes and a low hit rate is paying that premium without collecting the discount, which means caching is costing it money rather than saving it.\n\nReasoning tokens are already counted inside completion tokens and are broken out here only to show where completion spend is going \u2014 they are never added twice." },
       "name": "efficiency-title"
     },
     {
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "traces\n| where message startswith \"llm.request\"\n| extend\n    product = tostring(customDimensions[\"product\"]),\n    modelAlias = tostring(customDimensions[\"modelAlias\"]),\n    promptTokens = toint(customDimensions[\"promptTokens\"]),\n    cachedTokens = toint(customDimensions[\"cachedTokens\"]),\n    completionTokens = toint(customDimensions[\"completionTokens\"]),\n    reasoningTokens = toint(customDimensions[\"reasoningTokens\"]),\n    estimatedCostUSD = todouble(customDimensions[\"estimatedCostUSD\"])\n| where \"*\" in ({Product}) or product in ({Product})\n| summarize\n    Requests = count(),\n    [\"Prompt\"] = sum(promptTokens),\n    [\"Cached\"] = sum(cachedTokens),\n    [\"Completion\"] = sum(completionTokens),\n    [\"Reasoning\"] = sum(reasoningTokens),\n    [\"Estimated USD\"] = round(sum(iff(estimatedCostUSD > 0, estimatedCostUSD, 0.0)), 2)\n    by [\"Model alias\"] = modelAlias\n| extend [\"Cache hit share\"] = iff([\"Prompt\"] == 0, 0.0, round(todouble([\"Cached\"]) / [\"Prompt\"], 3))\n| extend [\"Reasoning share of output\"] = iff([\"Completion\"] == 0, 0.0, round(todouble([\"Reasoning\"]) / [\"Completion\"], 3))\n| extend [\"USD per 1k requests\"] = iff(Requests == 0, 0.0, round(1000.0 * [\"Estimated USD\"] / Requests, 2))\n| order by [\"Estimated USD\"] desc",
+        "query": "traces\n| where message startswith \"llm.request\"\n| extend\n    product = tostring(customDimensions[\"product\"]),\n    modelAlias = tostring(customDimensions[\"modelAlias\"]),\n    promptTokens = toint(customDimensions[\"promptTokens\"]),\n    cachedTokens = toint(customDimensions[\"cachedTokens\"]),\n    cacheWriteTokens = toint(customDimensions[\"cacheWriteTokens\"]),\n    completionTokens = toint(customDimensions[\"completionTokens\"]),\n    reasoningTokens = toint(customDimensions[\"reasoningTokens\"]),\n    estimatedCostUSD = todouble(customDimensions[\"estimatedCostUSD\"]),\n    cacheHit = tostring(customDimensions[\"cacheHit\"]) =~ \"True\",\n    costAvoidedUSD = coalesce(todouble(customDimensions[\"costAvoidedUSD\"]), 0.0)\n| where \"*\" in ({Product}) or product in ({Product})\n| summarize\n    Requests = count(),\n    [\"Cache hits\"] = countif(cacheHit),\n    [\"Prompt\"] = sum(promptTokens),\n    [\"Cached\"] = sum(cachedTokens),\n    [\"Cache writes\"] = sum(cacheWriteTokens),\n    [\"Completion\"] = sum(completionTokens),\n    [\"Reasoning\"] = sum(reasoningTokens),\n    [\"Estimated USD\"] = round(sum(iff(estimatedCostUSD > 0, estimatedCostUSD, 0.0)), 2),\n    [\"Saved USD\"] = round(sum(costAvoidedUSD), 2)\n    by [\"Model alias\"] = modelAlias\n| extend [\"Cache hit rate\"] = iff(Requests == 0, 0.0, round(todouble([\"Cache hits\"]) / Requests, 3))\n| extend [\"Prompt cache share\"] = iff([\"Prompt\"] == 0, 0.0, round(todouble([\"Cached\"]) / [\"Prompt\"], 3))\n| extend [\"Reasoning share of output\"] = iff([\"Completion\"] == 0, 0.0, round(todouble([\"Reasoning\"]) / [\"Completion\"], 3))\n| extend [\"USD per 1k requests\"] = iff(Requests == 0, 0.0, round(1000.0 * [\"Estimated USD\"] / Requests, 2))\n| extend [\"Saved share\"] = iff(([\"Estimated USD\"] + [\"Saved USD\"]) == 0, 0.0, round([\"Saved USD\"] / ([\"Estimated USD\"] + [\"Saved USD\"]), 3))\n| order by [\"Estimated USD\"] desc",
         "size": 0,
         "queryType": 0,
         "resourceType": "microsoft.insights/components",
         "visualization": "table",
         "gridSettings": {
           "formatters": [
-            { "columnMatch": "Cache hit share", "formatter": 5, "formatOptions": { "palette": "green" }, "numberFormat": { "unit": 0, "options": { "style": "percent", "maximumFractionDigits": 1 } } },
+            { "columnMatch": "Cache hit rate", "formatter": 5, "formatOptions": { "palette": "green" }, "numberFormat": { "unit": 0, "options": { "style": "percent", "maximumFractionDigits": 1 } } },
+            { "columnMatch": "Prompt cache share", "formatter": 5, "formatOptions": { "palette": "green" }, "numberFormat": { "unit": 0, "options": { "style": "percent", "maximumFractionDigits": 1 } } },
+            { "columnMatch": "Saved share", "formatter": 5, "formatOptions": { "palette": "blue" }, "numberFormat": { "unit": 0, "options": { "style": "percent", "maximumFractionDigits": 1 } } },
             { "columnMatch": "Reasoning share of output", "formatter": 5, "formatOptions": { "palette": "orange" }, "numberFormat": { "unit": 0, "options": { "style": "percent", "maximumFractionDigits": 1 } } }
           ]
         }

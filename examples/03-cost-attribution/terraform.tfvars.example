@@ -161,6 +161,12 @@ daily_spend_threshold_usd          = 250
 token_rate_alert_threshold         = 2000000
 unmeasured_usage_threshold_percent = 5
 
+# Caching is assumed to save money and is almost never checked. Cache writes are billed at a premium
+# over ordinary input, so a workload whose prompts vary just enough to miss the cache every time pays
+# that premium without ever collecting the discount. This alert catches that, per model.
+enable_cache_economics_alert        = true
+cache_write_premium_usd_per_million = 0.25
+
 alert_emails = ["finops@contoso.com", "ai-platform@contoso.com"]
 
 enable_eventhub_audit = false

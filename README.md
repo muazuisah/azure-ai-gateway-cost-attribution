@@ -28,7 +28,9 @@ A single, governed entry point for every Foundry model in your organization.
 - **Keyless** — APIM's managed identity authenticates to Foundry via RBAC. Foundry accounts run with `local_auth_enabled = false`, so key access is impossible.
 - **Token governance** — per-product rate limits *and* period quotas (`llm-token-limit`), keyed per consuming application.
 - **Content safety** — `llm-content-safety` with Prompt Shield on chat and responses operations, tunable per harm category.
-- **Semantic caching** — optional, off by default, with cache hits correctly reported as savings.
+- **Semantic caching** — optional, off by default. A cache hit is charged at zero rather than at the
+  price of the response it replays, and what it saved is reported separately, so the cache can be shown
+  to pay for itself — or shown not to.
 - **Observability** — Application Insights, Log Analytics, and per-request Azure Monitor token metrics emitted by the gateway policy.
 
 ### Layer 2 — Cost attribution

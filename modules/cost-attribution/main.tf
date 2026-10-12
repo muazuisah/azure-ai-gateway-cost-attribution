@@ -95,6 +95,14 @@ locals {
         completionTokens = toint(customDimensions["completionTokens"]),
         totalTokens    = toint(customDimensions["totalTokens"]),
         estimatedCostUSD = todouble(customDimensions["estimatedCostUSD"]),
+        // Served from the semantic cache, so no model ran and estimatedCostUSD is zero by design.
+        // Without this column a cache hit is indistinguishable from a genuinely free request, and the
+        // drop in spend that caching produces has no visible cause.
+        cacheHitRaw = tostring(customDimensions["cacheHit"]),
+        // What caching saved: the whole request on a semantic cache hit, or the input discount on
+        // tokens the model served from its prompt cache. Coalesced because traces predate the field,
+        // and a null here would poison every sum it takes part in rather than contributing nothing.
+        costAvoidedUSD = coalesce(todouble(customDimensions["costAvoidedUSD"]), 0.0),
         contextTierRaw = tostring(customDimensions["contextTier"])
     // consumer is the chargeback key. It prefers the Entra identity and falls back to the APIM
     // subscription id, so the same queries keep working on traces emitted before caller
@@ -108,6 +116,7 @@ locals {
     // "long" when input length pushed it into a higher band. Defaulted for traces emitted before
     // context tiers existed.
     | extend contextTier = iff(isempty(contextTierRaw), "base", contextTierRaw)
+    | extend cacheHit = cacheHitRaw =~ "True"
   KQL
 }
 
@@ -453,6 +462,83 @@ resource "azurerm_monitor_metric_alert" "token_burn_rate" {
 
   action {
     action_group_id = local.action_group_id
+  }
+}
+
+# ---------------------------------------------------------------------------------------------------
+# Alert 6 - cache economics
+#
+# Caching is assumed to save money and is almost never checked. It does not always save money.
+#
+# Writing to a prompt cache is charged at a premium over the normal input rate, and reading from one is
+# charged at a discount. A workload whose prompts vary just enough to miss on every request pays the
+# write premium repeatedly and collects the read discount rarely, so enabling the cache makes the bill
+# go up. Nothing about this is visible in a spend chart: the total simply drifts upward and looks like
+# organic growth.
+#
+# This compares what caching actually returned against what it cost to populate, per model, and fires
+# when the return falls short. It is deliberately scoped per modelAlias - one badly-behaved workload
+# can be net-negative while the estate as a whole still benefits, and the aggregate would hide it.
+# ---------------------------------------------------------------------------------------------------
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "cache_economics" {
+  count = local.alerts_enabled && var.enable_cache_economics_alert ? 1 : 0
+
+  name                = "${var.name_prefix}-ai-cache-economics"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  tags                = local.tags
+
+  description = "Caching is costing more than it is saving for a model. Prompts are varying too much to hit the cache while still paying the cache-write premium. Review whether caching is worth keeping on for this workload."
+  severity    = 3
+  enabled     = true
+
+  scopes                  = [var.application_insights_id]
+  evaluation_frequency    = "PT1H"
+  window_duration         = "P1D"
+  auto_mitigation_enabled = true
+
+  criteria {
+    # The write premium is approximated as 25 percent of the input rate, which is where Azure prices
+    # it for the models that charge for cache writes at all. The ledger carries the token counts but
+    # not a per-request breakdown of which rate applied to which token, so the exact premium is not
+    # recoverable here - and it does not need to be. This alert answers "is this cache worth having",
+    # a question that turns on a ratio, not on a precise figure.
+    query = <<-KQL
+      ${local.ledger_query}
+      | where status****** between (200 .. 299)
+      | summarize
+          SavedUSD = sum(costAvoidedUSD),
+          WriteTokens = sum(cacheWriteTokens),
+          Requests = count()
+          by modelAlias
+      // Below this volume the ratio is noise - a handful of requests during a cold cache will always
+      // look net-negative, because populating a cache necessarily precedes reading it.
+      | where Requests >= ${var.cache_economics_minimum_requests}
+      | where WriteTokens > 0
+      | extend EstimatedWriteCostUSD = (WriteTokens / 1000000.0) * ${var.cache_write_premium_usd_per_million}
+      | extend NetCacheBenefitUSD = round(SavedUSD - EstimatedWriteCostUSD, 6)
+      | project modelAlias, NetCacheBenefitUSD
+    KQL
+
+    time_aggregation_method = "Minimum"
+    metric_measure_column   = "NetCacheBenefitUSD"
+    threshold               = 0
+    operator                = "LessThan"
+
+    dimension {
+      name     = "modelAlias"
+      operator = "Include"
+      values   = ["*"]
+    }
+
+    failing_periods {
+      minimum_failing_periods_to_trigger_alert = 1
+      number_of_evaluation_periods             = 1
+    }
+  }
+
+  action {
+    action_groups = [local.action_group_id]
   }
 }
 

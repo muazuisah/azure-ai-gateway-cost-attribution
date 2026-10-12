@@ -70,10 +70,17 @@ envelope and each header proves a different part of the chain:
 | `x-ai-model-alias`, `x-ai-pool`, `x-ai-deployment` | alias resolution picked the route you intended |
 | `x-ai-total-tokens`, `x-ai-tokens-consumed` | §10 extracted usage from the response |
 | `x-ai-remaining-tokens` / `x-ai-remaining-quota-tokens` | the token limit is counting |
+| `x-ai-cache-hit`, `x-ai-cost-avoided-usd` | cache-hit detection ran and priced what it saved |
 
 A cost header of `-1` means the request was **unpriced** — the model is not in
 the rate card. That is a configuration gap, not a failure; see
 [cost-attribution.md](cost-attribution.md).
+
+A cost header of `0.00000000` alongside `x-ai-cache-hit: true` is a semantic
+cache hit: no model was called, so there is nothing to charge. The value of what
+it saved is in `x-ai-cost-avoided-usd`. Sending the same prompt twice in quick
+succession with caching enabled is the fastest way to confirm the cache is
+working end to end — the second response should return the pair above.
 
 **Backend topology is not leaking.** `x-ms-region`, `azureml-model-session` and
 `apim-request-id` should all be absent from the response. §12 deletes them. If
@@ -150,6 +157,30 @@ response shape §10 does not recognise.
 response. If a new API surface is returning usage under a field name §10 does
 not read, that is a policy change — see
 [policies.md §7](policies.md#7-extending-the-policy-safely).
+
+### `cache_economics` — severity 3, hourly over a one-day window
+
+**Means:** for one model alias, caching cost more than it saved. The tokens
+written to the prompt cache, priced at `cache_write_premium_usd_per_million`
+(default 0.25), exceeded the total `costAvoidedUSD` that caching returned.
+Models under `cache_economics_minimum_requests` (default 100) are ignored.
+
+**Check:** the token-efficiency table in the workbook, for that alias. The shape
+to look for is a high **Cache writes** column next to a low **Cache hit rate**
+and a low **Prompt cache share** — paying to populate a cache that is never
+read.
+
+**Do:** look at what varies between prompts for that workload. A timestamp, a
+session id, a user name or a randomised greeting near the start of the system
+prompt makes every prompt unique, which defeats both cache layers while still
+incurring the write premium. Moving the volatile content *after* the stable
+content usually fixes it outright, because caching matches on prefixes.
+
+If the prompts are genuinely all different — ad-hoc analysis, free-text search —
+then caching cannot help this workload and the honest answer is to turn it off
+for that model rather than keep paying for it. A cold cache after a deployment
+will trip this once and then clear itself; the minimum-request floor exists to
+stop that being a page.
 
 ### `product_spend` — severity 2, hourly over a one-day window
 
