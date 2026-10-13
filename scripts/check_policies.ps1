@@ -279,6 +279,27 @@ foreach ($case in $cases) {
             continue
         }
 
+        # A backend section accepts exactly one policy. Well-formed XML and every variable resolved is
+        # not enough to know that: the rule is API Management's, not the schema's, so a second element
+        # here renders cleanly, passes every check above, and is then refused by the service with
+        # "backend section allows only one policy to be specified" - at apply time, against a gateway
+        # that has already been built. Wrap the extra statements in a single <choose> instead.
+        $backendNode = $doc.SelectSingleNode('/policies/backend')
+        if ($backendNode) {
+            $backendChildren = @($backendNode.ChildNodes | Where-Object { $_.NodeType -eq 'Element' })
+            if ($backendChildren.Count -gt 1) {
+                Write-Host "[FAIL] $($case.Name): backend section has $($backendChildren.Count) policies; API Management allows one" -ForegroundColor Red
+                foreach ($child in $backendChildren) {
+                    Write-Host "       <$($child.Name)>" -ForegroundColor Red
+                }
+                Write-Host "       rendered output written to $out"
+                Write-Host "       wrap them in a single <choose><when condition='@(true)'> ... </when></choose>," -ForegroundColor DarkGray
+                Write-Host "       which is one policy to the validator and leaves execution order unchanged." -ForegroundColor DarkGray
+                $failed++
+                continue
+            }
+        }
+
         Write-Host "[ OK ] $($case.Name): $($xml.Length) chars, sections: $sections" -ForegroundColor Green
     }
     catch {

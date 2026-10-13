@@ -493,12 +493,23 @@
          because it cannot be made from the response: llm-semantic-cache-store keeps the backend's
          body verbatim, usage block and all, so a replayed hit presents exactly the same token counts
          as the call that originally produced it. Billing from those counts charges full price for a
-         model that was never invoked. -->
-    <set-variable name="backendCalled" value="@(true)" />
-    <forward-request timeout="${forward_timeout_seconds}"
-                     buffer-request-body="true"
-                     buffer-response="${buffer_response}"
-                     fail-on-error-status-code="false" />
+         model that was never invoked.
+
+         The always-true <choose> is not decoration. A backend section accepts exactly one policy, so
+         the marker and the forward cannot be siblings here; wrapping both in a single conditional
+         satisfies that rule while keeping the marker inside the section it is reporting on. Setting it
+         at the end of inbound instead would be subtly wrong - an inbound short-circuit such as the
+         content-safety refusal also skips the backend, and would then be indistinguishable from a
+         cache hit. -->
+    <choose>
+      <when condition="@(true)">
+        <set-variable name="backendCalled" value="@(true)" />
+        <forward-request timeout="${forward_timeout_seconds}"
+                         buffer-request-body="true"
+                         buffer-response="${buffer_response}"
+                         fail-on-error-status-code="false" />
+      </when>
+    </choose>
   </backend>
 
   <outbound>
