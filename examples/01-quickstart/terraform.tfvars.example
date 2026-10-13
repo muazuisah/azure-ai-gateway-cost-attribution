@@ -16,6 +16,19 @@ publisher_email = "ai-platform@contoso.com"
 # A cap, not a retention policy: data beyond it is dropped rather than deferred.
 log_analytics_daily_quota_gb = 5
 
+# --- Bring your own observability -----------------------------------------------------------------
+#
+# Decided independently: leave one blank and it is created, supply a resource ID and it is reused.
+# Most organisations already have a central workspace and expect workloads to log into it.
+#
+# Check two things before reusing an Application Insights component, because neither can be fixed
+# from here. It must be workspace-based, and its sampling must be 100%. Sampling silently drops
+# telemetry, and a dropped record is a missing chargeback row, so a sampled component understates
+# spend without ever reporting an error.
+#
+# existing_log_analytics_workspace_id = "/subscriptions/.../resourceGroups/platform-rg/providers/Microsoft.OperationalInsights/workspaces/platform-law"
+# existing_application_insights_id    = "/subscriptions/.../resourceGroups/platform-rg/providers/Microsoft.Insights/components/platform-appi"
+
 tags = {
   cost_centre = "CC-1234"
   owner       = "ai-platform@contoso.com"

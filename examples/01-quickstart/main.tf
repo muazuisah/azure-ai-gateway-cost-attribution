@@ -110,6 +110,9 @@ module "observability" {
 
   log_retention_days = 30
   daily_quota_gb     = var.log_analytics_daily_quota_gb
+
+  log_analytics_workspace_id = var.existing_log_analytics_workspace_id
+  application_insights_id    = var.existing_application_insights_id
 }
 
 # ---------------------------------------------------------------------------------------------------

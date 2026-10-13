@@ -151,6 +151,18 @@ variable "existing_private_endpoint_nsg_id" {
   default     = null
 }
 
+variable "existing_log_analytics_workspace_id" {
+  description = "Resource ID of an existing Log Analytics workspace to log into. Leave blank to create one. Reuse is the common case here: the workspace is usually a platform-team resource."
+  type        = string
+  default     = null
+}
+
+variable "existing_application_insights_id" {
+  description = "Resource ID of an existing Application Insights component to reuse. Leave blank to create one. It must be workspace-based, and its sampling must be 100% - sampling silently drops telemetry, and a dropped record is a missing chargeback row, so a sampled component understates spend without reporting an error."
+  type        = string
+  default     = null
+}
+
 variable "enable_nat_gateway" {
   description = "Give the gateway a stable outbound address. Worth it when a downstream endpoint allow-lists source IPs, or at volumes where SNAT port exhaustion becomes real."
   type        = bool
