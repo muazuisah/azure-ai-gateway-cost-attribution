@@ -47,6 +47,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 PASS = "PASS"
@@ -312,6 +313,112 @@ def check_unknown_alias(gw: Gateway) -> Result:
                   "backend unvalidated. {1}".format(status, _excerpt(body)))
 
 
+def check_cost_headers(headers: Dict[str, str]) -> Result:
+    """Cost attribution is optional, so its absence is a skip rather than a failure. What is not
+    optional, when it is on, is that the number parses - a malformed cost silently poisons every
+    downstream sum."""
+    if not headers:
+        return Result("cost-headers", SKIP, "no successful chat response to inspect")
+    raw = headers.get("x-ai-estimated-cost-usd")
+    if raw is None:
+        return Result("cost-headers", SKIP, "cost attribution is not enabled on this gateway")
+    try:
+        cost = float(raw)
+    except ValueError:
+        return Result("cost-headers", FAIL,
+                      "x-ai-estimated-cost-usd is not a number: {0!r}".format(raw))
+    # -1 is the sentinel for a request whose usage could not be measured, which is a real state and
+    # deliberately not reported as zero.
+    if cost == -1:
+        return Result("cost-headers", PASS,
+                      "cost reported as unmeasured (-1), which is the sentinel for a response that "
+                      "carried no usage block")
+    if cost < 0:
+        return Result("cost-headers", FAIL,
+                      "negative cost {0} that is not the -1 unmeasured sentinel".format(cost))
+    return Result("cost-headers", PASS, "x-ai-estimated-cost-usd={0}".format(raw))
+
+
+def check_semantic_cache(gw: Gateway, model: str) -> Result:
+    """The one capability whose correctness cannot be read off the response body.
+
+    llm-semantic-cache-store keeps the backend's reply verbatim, usage block and all, so a replayed
+    hit presents exactly the same token counts as the call that paid for it. A gateway that bills from
+    those counts charges full price for a model that never ran. This asserts the opposite: that the
+    second identical prompt is marked as a hit, costs nothing, and reports what it avoided.
+    """
+    prompt = "Name the seven colours of the rainbow in order, {0}.".format(uuid.uuid4())
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 64,
+        # Caching is suppressed above the policy's max_temperature, so a varied request would never
+        # be a hit no matter how correct the gateway is.
+        "temperature": 0,
+    }
+
+    status, first, _body = gw.request("/chat/completions", payload)
+    if status != 200:
+        return Result("semantic-cache", FAIL, "priming request failed with {0}".format(status))
+    if "x-ai-cache-hit" not in first:
+        return Result("semantic-cache", SKIP, "semantic caching is not enabled on this gateway")
+    if first.get("x-ai-cache-hit", "").lower() != "false":
+        return Result("semantic-cache", FAIL,
+                      "a prompt containing a fresh GUID was reported as a cache hit, so the cache is "
+                      "matching prompts it has never seen. Check score_threshold - above roughly 0.2 "
+                      "it returns answers to different questions.")
+
+    # The store happens in outbound, after the first response has been released to the client, and the
+    # index is not guaranteed to be queryable the instant the body arrives.
+    deadline = time.time() + 30
+    second: Dict[str, str] = {}
+    while time.time() < deadline:
+        time.sleep(3)
+        status, second, _body = gw.request("/chat/completions", payload)
+        if status != 200:
+            return Result("semantic-cache", FAIL, "replay request failed with {0}".format(status))
+        if second.get("x-ai-cache-hit", "").lower() == "true":
+            break
+    else:
+        return Result("semantic-cache", FAIL,
+                      "an identical prompt did not hit the cache within 30s. If the cache is Azure "
+                      "Cache for Redis Basic, Standard or Premium it has no RediSearch module and "
+                      "will never serve a hit, which looks exactly like a cache that is merely cold.")
+
+    cost = second.get("x-ai-estimated-cost-usd")
+    if cost is None:
+        return Result("semantic-cache", PASS,
+                      "replay served from cache (cost attribution is off, so no cost to check)")
+    try:
+        cost_value = float(cost)
+    except ValueError:
+        return Result("semantic-cache", FAIL,
+                      "cache hit reported a non-numeric cost {0!r}".format(cost))
+    if cost_value != 0:
+        return Result("semantic-cache", FAIL,
+                      "cache hit was billed {0}. The response carries the usage block of the call "
+                      "that populated the cache, so billing from it charges for a model that never "
+                      "ran.".format(cost))
+
+    avoided = second.get("x-ai-cost-avoided-usd")
+    if avoided is None:
+        return Result("semantic-cache", FAIL,
+                      "cache hit cost 0 but reported no x-ai-cost-avoided-usd, so the saving is "
+                      "invisible to chargeback")
+    try:
+        avoided_value = float(avoided)
+    except ValueError:
+        return Result("semantic-cache", FAIL,
+                      "x-ai-cost-avoided-usd is not a number: {0!r}".format(avoided))
+    if avoided_value <= 0:
+        return Result("semantic-cache", FAIL,
+                      "cache hit reported {0} avoided; a hit that saved nothing means the modelled "
+                      "cost was never computed".format(avoided))
+
+    return Result("semantic-cache", PASS,
+                  "replay hit: cost {0}, avoided {1}".format(cost, avoided))
+
+
 def check_failover(gw: Gateway, model: str, calls: int) -> Result:
     """Cannot force a backend to fail without breaking it, so this observes instead: repeated calls
     should show the pool distributing across members. One member is a valid topology, not a fault."""
@@ -383,6 +490,9 @@ def main() -> int:
     parser.add_argument("--failover-calls", type=int, default=4,
                         help="Repeat calls to observe pool distribution. Default 4.")
     parser.add_argument("--timeout", type=int, default=120, help="Per-request timeout. Default 120.")
+    parser.add_argument("--skip-cache", action="store_true",
+                        help="Skip the semantic cache check. It issues repeated identical prompts and "
+                             "waits for the cache to become queryable, which adds up to 30 seconds.")
     args = parser.parse_args()
 
     if not args.base_url:
@@ -425,10 +535,13 @@ def main() -> int:
         results.append(check_alias_routing(headers, model))
         results.append(check_token_headers(headers))
         results.append(check_governance_headers(headers))
+        results.append(check_cost_headers(headers))
         results.append(check_streaming(gw, model))
         results.append(check_embeddings(gw, embed_model))
         results.append(check_unknown_alias(gw))
         results.append(check_failover(gw, model, args.failover_calls))
+        if not args.skip_cache:
+            results.append(check_semantic_cache(gw, model))
     except RuntimeError as exc:
         print("error: {0}".format(exc), file=sys.stderr)
         render(results)

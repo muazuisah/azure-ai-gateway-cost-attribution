@@ -514,6 +514,29 @@
 
   <outbound>
     <base />
+%{ if enable_semantic_cache ~}
+    <!-- This element is first in the outbound section, and the position is the single most important
+         detail in this file. On a semantic cache hit API Management does not run the outbound section
+         from the top: it injects the cached response and **resumes execution at the cache-store
+         element**. Every policy above the store is therefore skipped on a hit.
+
+         With the store at the end - its intuitive home, since storing is logically the last thing you
+         do with a response - a cache hit skipped all of usage extraction, all of the cost maths and
+         the chargeback trace. The symptoms were measured on a live gateway: the replay carried the
+         *original* request's cost headers (they had been captured in the stored response), reported
+         zero tokens, reported cacheHit false, and emitted no ledger entry at all. In other words the
+         one request class the cost feature exists to measure was the one class it silently dropped.
+
+         Storing first inverts that. The stored copy is the backend's response before this gateway
+         annotates it, so no x-ai-* header is ever baked into the cache, and a hit re-enters outbound
+         at the first element and runs the whole pipeline - extraction, pricing, trace and headers -
+         against the replayed body. A cache hit is then measured exactly like a live call, which is
+         the only way costAvoidedUSD can mean anything.
+
+         Keep it an immediate child of outbound. Nesting it in a choose moves the resume point inside
+         a conditional whose guard variables are themselves unset on a hit. -->
+    <llm-semantic-cache-store duration="${semantic_cache_duration_seconds}" />
+%{ endif ~}
 
     <!-- ============================================================================================
          10. Usage extraction
@@ -569,69 +592,88 @@
       </otherwise>
     </choose>
 
+
+    <!-- Every read below treats a missing key and a JSON null as the same thing: zero.
+         This is not defensive habit, it is load-bearing. A JSON null arrives as a JValue whose Type is
+         Null, not as a C# null, so `token ?? fallback` does not fall through and `token == null` is
+         false. The cast that follows then throws, and an expression that throws inside set-variable
+         leaves the variable *unset* rather than failing the request. Everything downstream that reads
+         it throws "the given key was not present in the Variables dictionary", and the first one of
+         those to sit inside a set-header turns the whole response into a 500.
+         That is how a usage block carrying a null total_tokens - which is what a replayed semantic
+         cache response can look like - took down requests that were otherwise being served correctly
+         from cache. -->
     <set-variable name="promptTokens" value='@{
-        var usage = ((JObject)context.Variables["responseBody"])["usage"];
-        if (usage == null) { return 0; }
+        var usage = context.Variables.GetValueOrDefault&lt;JObject&gt;("responseBody", new JObject())["usage"];
+        if (usage == null || usage.Type == JTokenType.Null) { return 0; }
         var token = usage["prompt_tokens"] ?? usage["input_tokens"];
-        return token == null ? 0 : (int)token;
+        return (token == null || token.Type == JTokenType.Null) ? 0 : (int)token;
     }' />
 
     <set-variable name="completionTokens" value='@{
-        var usage = ((JObject)context.Variables["responseBody"])["usage"];
-        if (usage == null) { return 0; }
+        var usage = context.Variables.GetValueOrDefault&lt;JObject&gt;("responseBody", new JObject())["usage"];
+        if (usage == null || usage.Type == JTokenType.Null) { return 0; }
         var token = usage["completion_tokens"] ?? usage["output_tokens"];
-        return token == null ? 0 : (int)token;
+        return (token == null || token.Type == JTokenType.Null) ? 0 : (int)token;
     }' />
 
     <set-variable name="totalTokens" value='@{
-        var usage = ((JObject)context.Variables["responseBody"])["usage"];
-        if (usage == null) { return 0; }
+        var usage = context.Variables.GetValueOrDefault&lt;JObject&gt;("responseBody", new JObject())["usage"];
+        var fallback = context.Variables.GetValueOrDefault&lt;int&gt;("promptTokens", 0)
+                     + context.Variables.GetValueOrDefault&lt;int&gt;("completionTokens", 0);
+        if (usage == null || usage.Type == JTokenType.Null) { return fallback; }
         var token = usage["total_tokens"];
-        if (token != null) { return (int)token; }
-        return (int)context.Variables["promptTokens"] + (int)context.Variables["completionTokens"];
+        if (token == null || token.Type == JTokenType.Null) { return fallback; }
+        return (int)token;
     }' />
 
     <!-- Cached prompt tokens are a SUBSET of prompt_tokens, not an addition to them. -->
     <set-variable name="cachedTokens" value='@{
-        var usage = ((JObject)context.Variables["responseBody"])["usage"];
-        if (usage == null) { return 0; }
+        var usage = context.Variables.GetValueOrDefault&lt;JObject&gt;("responseBody", new JObject())["usage"];
+        if (usage == null || usage.Type == JTokenType.Null) { return 0; }
         var details = usage["prompt_tokens_details"] ?? usage["input_tokens_details"];
-        if (details == null) { return 0; }
+        if (details == null || details.Type == JTokenType.Null) { return 0; }
         var token = details["cached_tokens"];
-        return token == null ? 0 : (int)token;
+        return (token == null || token.Type == JTokenType.Null) ? 0 : (int)token;
     }' />
 
     <!-- Cache-write tokens are billed at a premium by some models. Absent on models that do not bill
          them, in which case this is zero and the cost expression collapses to the classic form. -->
     <set-variable name="cacheWriteTokens" value='@{
-        var usage = ((JObject)context.Variables["responseBody"])["usage"];
-        if (usage == null) { return 0; }
+        var usage = context.Variables.GetValueOrDefault&lt;JObject&gt;("responseBody", new JObject())["usage"];
+        if (usage == null || usage.Type == JTokenType.Null) { return 0; }
         var details = usage["prompt_tokens_details"] ?? usage["input_tokens_details"];
-        if (details == null) { return 0; }
+        if (details == null || details.Type == JTokenType.Null) { return 0; }
         var token = details["cache_write_tokens"] ?? details["cache_creation_tokens"];
-        return token == null ? 0 : (int)token;
+        return (token == null || token.Type == JTokenType.Null) ? 0 : (int)token;
     }' />
 
     <!-- Reasoning tokens are already counted inside completion_tokens. Reported for visibility only;
          adding them to the cost expression would double-charge every reasoning call. -->
     <set-variable name="reasoningTokens" value='@{
-        var usage = ((JObject)context.Variables["responseBody"])["usage"];
-        if (usage == null) { return 0; }
+        var usage = context.Variables.GetValueOrDefault&lt;JObject&gt;("responseBody", new JObject())["usage"];
+        if (usage == null || usage.Type == JTokenType.Null) { return 0; }
         var details = usage["completion_tokens_details"] ?? usage["output_tokens_details"];
-        if (details == null) { return 0; }
+        if (details == null || details.Type == JTokenType.Null) { return 0; }
         var token = details["reasoning_tokens"];
-        return token == null ? 0 : (int)token;
+        return (token == null || token.Type == JTokenType.Null) ? 0 : (int)token;
     }' />
 
     <set-variable name="billablePromptTokens" value='@(Math.Max(0,
-        (int)context.Variables["promptTokens"]
-      - (int)context.Variables["cachedTokens"]
-      - (int)context.Variables["cacheWriteTokens"]))' />
+        context.Variables.GetValueOrDefault&lt;int&gt;("promptTokens", 0)
+      - context.Variables.GetValueOrDefault&lt;int&gt;("cachedTokens", 0)
+      - context.Variables.GetValueOrDefault&lt;int&gt;("cacheWriteTokens", 0)))' />
 
 %{ if enable_semantic_cache ~}
     <!-- Served from the semantic cache, meaning no model was called and nothing was billed by Azure.
-         Derived from whether the backend section ran rather than from anything on the response,
-         because a replayed response is byte-identical to the one that was stored. -->
+         Derived from whether the backend section ran rather than from anything on the response: a
+         replayed response is byte-identical to the one that was stored, so it carries no evidence of
+         its own origin. A cache hit skips the backend section, so the marker set there is absent.
+
+         This only reads correctly because llm-semantic-cache-store is the first element of outbound.
+         Any element placed above the store is skipped on a hit, so computing this earlier in the
+         section would leave it unset and silently default to false on precisely the requests it
+         exists to identify. See the note on the store element. -->
     <set-variable name="cacheHit" value='@(!context.Variables.ContainsKey("backendCalled"))' />
 %{ else ~}
     <!-- Semantic caching is disabled, so every response came from a model. Defined unconditionally so
@@ -858,7 +900,7 @@
     </trace>
 
     <set-header name="x-ai-estimated-cost-usd" exists-action="override">
-      <value>@(((double)context.Variables["estimatedCostUSD"]).ToString("F8"))</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;double&gt;("estimatedCostUSD", 0.0).ToString("F8"))</value>
     </set-header>
 
 %{ if enable_eventhub_audit ~}
@@ -912,10 +954,6 @@
 %{ endif ~}
 %{ endif ~}
 
-%{ if enable_semantic_cache ~}
-    <llm-semantic-cache-store duration="${semantic_cache_duration_seconds}" />
-%{ endif ~}
-
     <!-- ============================================================================================
          12. Governance headers
          These make gateway behaviour observable from the client without needing portal access, which
@@ -924,41 +962,46 @@
     <!-- The correlation id has to come back on success too, not only from the on-error handler. It is
          the join key between a caller's logs and this gateway's telemetry, and a caller that can only
          obtain it by failing cannot use it to trace a slow or wrong-but-successful response. -->
+    <!-- Read through GetValueOrDefault rather than the indexer, for the reason given at the top of
+         section 10. A response header is the last place a request can still be turned into a 500, so
+         nothing here may assume that an earlier expression succeeded. A missing value is reported as
+         its zero rather than suppressed: a caller reading 0 tokens on a 200 can tell something is
+         wrong, whereas an absent header looks like a gateway that was never configured to send it. -->
     <set-header name="x-correlation-id" exists-action="override">
-      <value>@((string)context.Variables["correlationId"])</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;string&gt;("correlationId", context.RequestId.ToString()))</value>
     </set-header>
     <set-header name="x-ai-model-alias" exists-action="override">
-      <value>@((string)context.Variables["requestedModel"])</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;string&gt;("requestedModel", "unknown"))</value>
     </set-header>
     <set-header name="x-ai-deployment" exists-action="override">
-      <value>@((string)context.Variables["targetDeployment"])</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;string&gt;("targetDeployment", "unknown"))</value>
     </set-header>
     <set-header name="x-ai-pool" exists-action="override">
-      <value>@((string)context.Variables["targetPool"])</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;string&gt;("targetPool", "unknown"))</value>
     </set-header>
     <set-header name="x-ai-total-tokens" exists-action="override">
-      <value>@(((int)context.Variables["totalTokens"]).ToString())</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;int&gt;("totalTokens", 0).ToString())</value>
     </set-header>
     <set-header name="x-ai-cached-tokens" exists-action="override">
-      <value>@(((int)context.Variables["cachedTokens"]).ToString())</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;int&gt;("cachedTokens", 0).ToString())</value>
     </set-header>
     <!-- A caller that sees a zero cost needs to know whether it was cached or simply unpriced, and a
          caller tuning its prompts for cache reuse needs the hit rate without waiting on a workbook. -->
     <set-header name="x-ai-cache-hit" exists-action="override">
-      <value>@(((bool)context.Variables["cacheHit"]).ToString().ToLowerInvariant())</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;bool&gt;("cacheHit", false).ToString().ToLowerInvariant())</value>
     </set-header>
 %{ if enable_cost_attribution ~}
     <set-header name="x-ai-cost-avoided-usd" exists-action="override">
-      <value>@(((double)context.Variables["costAvoidedUSD"]).ToString("F8"))</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;double&gt;("costAvoidedUSD", 0.0).ToString("F8"))</value>
     </set-header>
 %{ endif ~}
     <set-header name="x-ai-latency-ms" exists-action="override">
-      <value>@(((DateTime.UtcNow - (DateTime)context.Variables["requestStart"]).TotalMilliseconds).ToString("F0"))</value>
+      <value>@(((DateTime.UtcNow - context.Variables.GetValueOrDefault&lt;DateTime&gt;("requestStart", DateTime.UtcNow)).TotalMilliseconds).ToString("F0"))</value>
     </set-header>
     <!-- Echoing the resolved consumer lets a caller confirm which identity its spend lands against,
          which is the difference between a chargeback dispute and a one-line answer. -->
     <set-header name="x-ai-consumer" exists-action="override">
-      <value>@((string)context.Variables["consumerName"])</value>
+      <value>@(context.Variables.GetValueOrDefault&lt;string&gt;("consumerName", "unknown"))</value>
     </set-header>
 
     <!-- Which backend actually served this request is otherwise invisible. x-ai-deployment and

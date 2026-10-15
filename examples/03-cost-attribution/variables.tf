@@ -25,6 +25,12 @@ variable "tags" {
 # Existing infrastructure
 # ---------------------------------------------------------------------------------------------------
 
+variable "api_path" {
+  description = "Path segment this gateway API is published under. The default makes it a drop-in replacement for a Foundry endpoint. Change it only when the instance already publishes an API on openai/v1 - two APIs cannot share a path, and a second, separately governed gateway is a legitimate reason to want one."
+  type        = string
+  default     = "openai/v1"
+}
+
 variable "existing_api_management_id" {
   description = "Resource ID of the API Management instance to publish the gateway API onto. Any tier except Consumption; the token-limit policies are unavailable there."
   type        = string
@@ -197,4 +203,72 @@ variable "enable_eventhub_audit" {
   description = "Stream every request out unsampled for audit-grade chargeback."
   type        = bool
   default     = false
+}
+
+# ---------------------------------------------------------------------------------------------------
+# Semantic cache
+#
+# Caching belongs in the cost attribution example rather than in the quickstart because its effect is
+# a cost effect, and because it is the one feature whose savings cannot be read off a bill: a cache hit
+# is returned with the usage block of the call that originally populated it, so a gateway that bills
+# from the response charges full price for a model that never ran. The ledger separates the two.
+# ---------------------------------------------------------------------------------------------------
+variable "enable_semantic_cache" {
+  description = "Serve semantically similar prompts from a cache. Requires a RediSearch-capable cache; set semantic_cache_redis_connection_string to use one you already run, or leave it blank to have this example create an Azure Managed Redis instance."
+  type        = bool
+  default     = false
+}
+
+variable "semantic_cache_redis_connection_string" {
+  description = "Connection string for an existing RediSearch-capable cache, in the form host:port,password=...,ssl=True,abortConnect=False. Leave blank to create one. Azure Cache for Redis Basic, Standard and Premium do not carry the RediSearch module and will not serve a single hit - the symptom is a cache that looks healthy and never matches."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "semantic_cache_redis_sku" {
+  description = "SKU for the Azure Managed Redis instance created when no connection string is supplied. Balanced_B0 is the smallest that carries RediSearch."
+  type        = string
+  default     = "Balanced_B0"
+}
+
+variable "semantic_cache_redis_location" {
+  description = <<-EOT
+    Region for the created Azure Managed Redis instance. Defaults to the resource group's region.
+
+    Override this only when the gateway's region has no Managed Redis capacity. The symptom is a
+    `CacheCapacityUnavailable` 409 on apply, and it is a property of the region rather than the SKU,
+    so trying smaller SKUs does not help. Every cache lookup is on the request path, so a cross-region
+    cache adds its round trip to every call: prefer co-location and treat this as a fallback.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "semantic_cache_embeddings_deployment" {
+  description = "Deployment name used to vectorise prompts for cache lookup. Must exist on the Foundry account named by semantic_cache_embeddings_backend."
+  type        = string
+  default     = "text-embedding-3-small"
+}
+
+variable "semantic_cache_embeddings_backend" {
+  description = "Key from foundry_backends whose account hosts the embeddings deployment. Defaults to the first key in sorted order."
+  type        = string
+  default     = null
+}
+
+variable "semantic_cache_settings" {
+  description = "Cache behaviour. score_threshold is the similarity distance below which a stored response is reused - lower is stricter, and values above 0.2 start returning answers to questions that were not asked. max_temperature suppresses caching for requests that asked for variety."
+  type = object({
+    max_temperature   = optional(number, 0.3)
+    score_threshold   = optional(number, 0.05)
+    max_message_count = optional(number, 10)
+    duration_seconds  = optional(number, 3600)
+  })
+  default = {}
+
+  validation {
+    condition     = var.semantic_cache_settings.score_threshold > 0 && var.semantic_cache_settings.score_threshold < 1
+    error_message = "score_threshold must be between 0 and 1."
+  }
 }

@@ -231,6 +231,34 @@ cacheHit = !context.Variables.ContainsKey("backendCalled")
 
 This is why `cacheHit` is derived where it is, and why it cannot be inferred from `usageMeasured` — a cache hit looks fully measured, because it is.
 
+### The second trap: where the outbound section starts
+
+The control-flow signal above is correct, but it only ever gets *evaluated* because of where one element sits.
+
+On a semantic cache hit, API Management does not begin the outbound section at the top. It injects the cached response and **resumes execution at the `llm-semantic-cache-store` element**. Everything above the store is skipped.
+
+Put the store in its intuitive place — last, because storing is logically the final thing you do with a response — and a cache hit skips the whole of usage extraction, the whole of the cost calculation, and the chargeback trace. Measured on a live gateway, that produced:
+
+- the replayed response carrying the **original** request's `x-ai-estimated-cost-usd`, because that header had been captured in the stored copy;
+- `x-ai-total-tokens: 0` and `x-ai-cache-hit: false`, because those are set after the store and read variables that were never assigned;
+- **no ledger entry at all** for the hit.
+
+The one request class the feature exists to measure was the one class it silently dropped — and the gateway returned `200` throughout, so nothing looked wrong.
+
+The fix is positional. `llm-semantic-cache-store` is the **first** element of the outbound section:
+
+```xml
+<outbound>
+  <base />
+  <llm-semantic-cache-store duration="..." />
+  <!-- usage extraction, pricing, ledger, headers -->
+</outbound>
+```
+
+Two things follow. The stored copy is the backend's response *before* this gateway annotates it, so no `x-ai-*` header is ever baked into the cache. And a hit re-enters outbound at the first element, so extraction, pricing, trace and headers all run against the replayed body — a cache hit is measured exactly like a live call, which is the only way `costAvoidedUSD` can carry meaning.
+
+Keep it an immediate child of `<outbound>`. Nesting it in a `<choose>` moves the resume point inside a conditional whose guard variables are themselves unset on a hit.
+
 ### What gets recorded
 
 | Field | On a semantic cache hit | On a prompt-cached request |
