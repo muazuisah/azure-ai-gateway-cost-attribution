@@ -70,7 +70,7 @@ envelope and each header proves a different part of the chain:
 | `x-ai-model-alias`, `x-ai-pool`, `x-ai-deployment` | alias resolution picked the route you intended |
 | `x-ai-total-tokens`, `x-ai-tokens-consumed` | §10 extracted usage from the response |
 | `x-ai-remaining-tokens` / `x-ai-remaining-quota-tokens` | the token limit is counting |
-| `x-ai-cache-hit`, `x-ai-cost-avoided-usd` | cache-hit detection ran and priced what it saved |
+| `x-ai-cache-hit`, `x-ai-cost-avoided-usd` | cache-hit detection ran and priced what it saved. Both are absent when the semantic cache is disabled, which is how a caller tells "no cache here" from "asked and missed" |
 
 A cost header of `-1` means the request was **unpriced** — the model is not in
 the rate card. That is a configuration gap, not a failure; see

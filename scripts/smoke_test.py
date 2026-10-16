@@ -386,9 +386,10 @@ def check_semantic_cache(gw: Gateway, model: str) -> Result:
         return Result("semantic-cache", SKIP, "semantic caching is not enabled on this gateway")
     if first.get("x-ai-cache-hit", "").lower() != "false":
         return Result("semantic-cache", FAIL,
-                      "a prompt containing a fresh GUID was reported as a cache hit, so the cache is "
-                      "matching prompts it has never seen. Check score_threshold - above roughly 0.2 "
-                      "it returns answers to different questions.")
+                      "a prompt on a subject the cache has not seen this run was reported as a hit, "
+                      "so the cache is matching prompts it has never been given. Check "
+                      "score_threshold - the looser it is, the more readily the gateway answers one "
+                      "question with the reply to another.")
 
     # The store happens in outbound, after the first response has been released to the client, and the
     # index is not guaranteed to be queryable the instant the body arrives.

@@ -1019,10 +1019,19 @@
       <value>@(context.Variables.GetValueOrDefault&lt;int&gt;("cachedTokens", 0).ToString())</value>
     </set-header>
     <!-- A caller that sees a zero cost needs to know whether it was cached or simply unpriced, and a
-         caller tuning its prompts for cache reuse needs the hit rate without waiting on a workbook. -->
+         caller tuning its prompts for cache reuse needs the hit rate without waiting on a workbook.
+
+         Emitted only when the cache exists. With no cache the value is constant false, which tells a
+         caller nothing and actively misleads: a client cannot distinguish "asked and missed" from
+         "no cache here". Its absence is the signal that the capability is not deployed, which is how
+         scripts/smoke_test.py knows to skip the cache check rather than fail a healthy gateway. The
+         ledger still carries cacheHit unconditionally, deliberately, so the schema does not change
+         shape with configuration - but a response header is a contract with the caller, not a row. -->
+%{ if enable_semantic_cache ~}
     <set-header name="x-ai-cache-hit" exists-action="override">
       <value>@(context.Variables.GetValueOrDefault&lt;bool&gt;("cacheHit", false).ToString().ToLowerInvariant())</value>
     </set-header>
+%{ endif ~}
 %{ if enable_cost_attribution ~}
     <set-header name="x-ai-cost-avoided-usd" exists-action="override">
       <value>@(context.Variables.GetValueOrDefault&lt;double&gt;("costAvoidedUSD", 0.0).ToString("F8"))</value>
