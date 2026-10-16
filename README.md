@@ -132,13 +132,48 @@ Then `terraform apply`. See [`examples/03-cost-attribution`](examples/03-cost-at
 ## Proof it works
 
 This is not a design sketch. Both examples were deployed to a real subscription, driven with real
-traffic, and measured. The full write-up — method, raw results, and the ten defects that only a live
+traffic, and measured. The full write-up — method, raw results, and the thirteen defects that only a live
 deployment could surface — is in [`docs/validation.md`](docs/validation.md).
 
 **Chargeback ledger, queried from a running deployment:** four consumers across three products, two
 Foundry regions behind one gateway.
 
 ![Chargeback ledger evidence](docs/images/cost-attribution-evidence.png)
+
+**Cache economics**, measured on the live gateway: three prompts, each sent three times, against
+`gpt-4.1-mini` with semantic caching on. Every figure below is read from the response headers the
+gateway returned — nothing is modelled.
+
+| Prompt | Pass | `x-ai-cache-hit` | Tokens | `x-ai-estimated-cost-usd` | `x-ai-cost-avoided-usd` | Latency |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| *Summarise the purpose of an API gateway…* | 1 | `false` | 69 | 0.00008640 | 0.00000000 | 1933 ms |
+| | 2 | `true` | 69 | 0.00000000 | 0.00008640 | 267 ms |
+| | 3 | `true` | 69 | 0.00000000 | 0.00008640 | 237 ms |
+| *What is the difference between a VNet and a subnet?* | 1 | `false` | 79 | 0.00010360 | 0.00000000 | 1184 ms |
+| | 2 | `true` | 79 | 0.00000000 | 0.00010360 | 278 ms |
+| | 3 | `true` | 79 | 0.00000000 | 0.00010360 | 137 ms |
+| *Explain token-based rate limiting…* | 1 | `false` | 78 | 0.00010320 | 0.00000000 | 2673 ms |
+| | 2 | `true` | 78 | 0.00000000 | 0.00010320 | 163 ms |
+| | 3 | `true` | 78 | 0.00000000 | 0.00010320 | 353 ms |
+| **Totals** | | 3 miss / 6 hit | 226 | **0.00029320** | **0.00058640** | |
+
+Three properties matter here, and each one is a thing a naive implementation gets wrong:
+
+- **A hit is priced at zero, not at full rate.** The replayed body carries the original `usage`
+  block, so an implementation that simply reads token counts will bill a consumer for a model that
+  never ran.
+- **A hit still reports its token count** (69, 79, 78 — identical to the call that populated the
+  cache) and still writes a ledger entry. Savings you cannot see are savings you cannot defend.
+- **`costAvoidedUSD` captures what was saved.** Billed spend was $0.00029320 against $0.00087960 of
+  modelled demand — **66.7% avoided** — while p50 latency fell from ~1.9 s to ~0.24 s.
+
+Sum `estimatedCostUSD + costAvoidedUSD` to reconstruct what the traffic would have cost without the
+cache; sum `estimatedCostUSD` alone for what Azure actually billed.
+
+**Every cost attribute the gateway promises, queried from the live ledger** — per-request detail,
+cache economics, and attribution rolled up by consumer, product and model:
+
+![Cache economics and cost attributes captured in the ledger](docs/images/cache-economics-evidence.png)
 
 **Weighted load balancing**, 200 requests against a pool configured 70 / 30 across East US and West
 Europe:

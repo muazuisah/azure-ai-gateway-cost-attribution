@@ -839,7 +839,10 @@
          trace policy emits nothing and cost tracking silently reports zero. -->
     <trace source="ai-gateway" severity="information">
       <message>@("llm.request " + (string)context.Variables["requestedModel"])</message>
-      <metadata name="schemaVersion" value="1" />
+      <!-- 2, matching the Event Hub ledger below: this trace carries cacheHit and costAvoidedUSD, and
+           estimatedCostUSD means billed rather than modelled cost. A consumer of either stream has to
+           be able to tell the two shapes apart from the record alone, so the two must not drift. -->
+      <metadata name="schemaVersion" value="2" />
       <metadata name="correlationId" value='@((string)context.Variables["correlationId"])' />
       <metadata name="environment" value="{{${environment_named_value}}}" />
       <metadata name="product" value='@((string)context.Variables["consumerProduct"])' />

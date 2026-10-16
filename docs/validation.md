@@ -15,7 +15,8 @@ against a live subscription, and several needed live traffic on top of that.
 | Regions | East US (primary), West Europe (secondary) |
 | Gateway | API Management, VNet-injected, External |
 | Models | `gpt-4.1` and `gpt-4.1-mini` @ `2025-04-14`, `text-embedding-3-large` @ `1` |
-| Examples | `01-quickstart`, `02-production-private` |
+| Examples | `01-quickstart`, `02-production-private`, `03-cost-attribution` |
+| Semantic cache | Azure Managed Redis `Balanced_B0`, RediSearch |
 
 ---
 
@@ -29,6 +30,8 @@ against a live subscription, and several needed live traffic on top of that.
 | Priority failover | 70 requests at `chat`, pool priority 1 / 2 | primary-only until it throttled, then spill |
 | Streaming | `scripts/smoke_test.py`, plus a direct comparison against Foundry | 50 chunks over 0.23 s |
 | Chargeback ledger | 79 requests across 4 consumers and 3 products | every attribute populated |
+| Cost-attribution example | `terraform apply`, then `scripts/smoke_test.py` | 12 / 12 checks pass |
+| Semantic cache economics | 3 prompts × 3 passes, cache on | 6 hits priced at 0, 66.7 % cost avoided |
 | Content safety | prompts from 5 k to 16 k characters | limit found and handled |
 | Pricing map | `scripts/generate_pricing_map.py` | live Azure retail prices API |
 
@@ -238,6 +241,54 @@ refuse to load such a record at all. Renamed to `backendRegion`.
 `az cognitiveservices model list` still advertises inference until 2027. The catalogue date describes
 *serving*, not *deploying*. Examples are pinned to `gpt-4.1` / `gpt-4.1-mini` @ `2025-04-14`, and the
 examples carry the command to re-check before deploying.
+
+### A JSON null is not a null
+
+A `usage` block can carry `"total_tokens": null`. In an API Management expression that arrives as a
+`JValue` whose `Type` is `Null` — **not** as a C# `null`. So `token ?? fallback` does not fall
+through, `token == null` is false, and the `(int)` cast that follows throws.
+
+The consequence is worse than the cause. An expression that throws inside `set-variable` leaves the
+variable **unset rather than failing the request**, so nothing is reported at the point of failure.
+The damage surfaced much later, at the first downstream reader — a `set-header` — as:
+
+```
+ExpressionValueEvaluationFailure at set-header[6]
+The given key 'totalTokens' was not present in the Variables dictionary.
+```
+
+Every affected request returned **500** to the caller. Token extraction now treats a JSON null as
+zero explicitly, and the governance headers read through `GetValueOrDefault`, so no single unset
+variable can turn a served response into an error.
+
+### The outbound section does not start where you think on a cache hit
+
+The headline defect, and the only one that produced a wrong *number* rather than an error.
+
+On a semantic cache hit, API Management injects the cached response and resumes outbound execution
+**at the `llm-semantic-cache-store` element** — not at the top of the section. With the store in its
+intuitive position (last, because storing is logically the final step), a cache hit skipped all of
+usage extraction, all of the cost calculation, and the chargeback trace.
+
+Measured on the live gateway, a replay:
+
+- returned the **original** request's `x-ai-estimated-cost-usd`, because that header had been
+  captured inside the stored response;
+- reported `x-ai-total-tokens: 0` and `x-ai-cache-hit: false`;
+- wrote **no ledger entry at all**.
+
+All behind a `200`. The single request class the cost-attribution feature exists to measure was the
+one class it silently dropped, and no local check could see it: the policy is valid XML, every
+expression is legal, and `terraform apply` succeeds.
+
+Moving `llm-semantic-cache-store` to be the first element of `<outbound>` fixes both halves. The
+stored copy is the backend's response before the gateway annotates it, so no `x-ai-*` header is ever
+baked into the cache; and a hit re-enters outbound at the first element, running extraction, pricing,
+trace and headers against the replayed body.
+
+After the fix, the same replay reports `cacheHit: true`, recovers all 39 tokens from the cached body,
+prices at `0.00000000`, and records `costAvoidedUSD` equal to the original call's cost — in 273 ms
+against 2887 ms.
 
 ---
 
