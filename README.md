@@ -136,11 +136,36 @@ cd ../01-quickstart
 terraform output -raw api_management_id
 terraform output -raw resource_group_name
 terraform output -raw application_insights_id
+terraform output -raw application_insights_instrumentation_key
 terraform output foundry_backends          # paste-ready
 terraform output foundry_accounts
 
 cd ../03-cost-attribution
-cp terraform.tfvars.example terraform.tfvars   # paste the values above, then set the pricing map
+cp terraform.tfvars.example terraform.tfvars   # paste the values above
+```
+
+Three edits to `terraform.tfvars` are not optional, and each one fails late if you skip it:
+
+- **`api_path`** — the quickstart already publishes on `openai/v1`, and two APIs on one API Management
+  instance cannot share a path. Layering onto your own quickstart means setting something else, such
+  as `api_path = "chargeback/v1"`. Pointing example 03 at a *different* instance is the one case where
+  the default is right.
+- **`model_routes` and `foundry_backends`** — the template lists `gpt-4.1` and `text-embedding-3-large`,
+  but the quickstart deploys `gpt-4.1-mini` and `text-embedding-3-small`. Routes are checked at plan
+  time against the deployments you declare, so a stale copy stops the plan rather than producing a 404
+  later.
+- **`foundry_account_ids`** — leave it `{}` when layering onto the quickstart, which has already granted
+  API Management the `Cognitive Services User` role. Populating it asks Terraform to own a grant that
+  already exists.
+
+Generate the pricing map rather than typing rates by hand — it reads live retail prices, and the
+aliases must match your `model_routes` keys:
+
+```bash
+python ../../scripts/generate_pricing_map.py --region eastus \
+  --alias chat-fast=gpt-4.1-mini --alias embed=text-embedding-3-small \
+  --output pricing.auto.tfvars.json
+
 terraform init
 terraform apply
 ```
@@ -154,7 +179,7 @@ per-request figure is a defensible estimate rather than an invoice.
 ## Proof it works
 
 This is not a design sketch. Both examples were deployed to a real subscription, driven with real
-traffic, and measured. The full write-up — method, raw results, and the fourteen defects that only a live
+traffic, and measured. The full write-up — method, raw results, and the sixteen defects that only a live
 deployment could surface — is in [`docs/validation.md`](docs/validation.md).
 
 **Chargeback ledger, queried from a running deployment:** four consumers across three products, two

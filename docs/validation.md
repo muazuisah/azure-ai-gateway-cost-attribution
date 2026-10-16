@@ -342,6 +342,56 @@ Three changes, none of which is a threshold:
 The residual risk is documented rather than fixed, because it cannot be fixed by configuration: do
 not enable semantic caching on routes whose answers depend on an identifier in the prompt.
 
+### 15. A redaction mask committed into an alert query
+
+Found by provisioning from a clean clone, following the README literally — the path a first-time user
+takes and the only one that exercises every resource from nothing.
+
+`terraform apply` failed against the live service:
+
+```
+creating Scheduled Query Rule "...-ai-cache-economics": 400 BadRequest:
+Query could not be parsed at '*' on line [54,16]
+```
+
+Line 54 of the rendered query was `| where statusCode between (200 .. 299)`. The source did not say
+`statusCode`. It said `status` followed by six asterisks — a terminal's secret-redaction mask, copied
+back into the file when the cache-economics alert was written, and committed in `b372945`.
+
+Nothing in the existing checks could catch it. The file is valid HCL, `terraform validate` passes,
+`terraform plan` succeeds, and the policy renderer never looks at Terraform's monitoring resources.
+The break exists only in a string that Azure parses, so it surfaces at apply time against the live
+service and nowhere earlier. It had gone unnoticed because the alert is opt-in and had never been
+deployed until this run.
+
+Two fixes:
+
+- The identifier was restored by hand rather than re-copied from a terminal, which is how it was
+  corrupted in the first place.
+- `scripts/check_policies.ps1` now fails on any run of three or more asterisks in `.tf`, `.tftpl`,
+  `.xml`, `.py`, `.ps1` or `.json` files. A mask is never legitimate in those file types, and the
+  check costs nothing. Verified by injecting one and confirming a non-zero exit.
+
+The general lesson is worth more than the specific bug: a KQL query embedded in Terraform is a string
+to every tool in the chain, so it is validated by nobody until Azure sees it. Anything that reaches a
+service as text needs a deployment to prove it.
+
+### 16. The documented cost-attribution path collided with itself
+
+The same clean-room run found three gaps in the README's example 03 procedure, all of which stop a
+first-time user:
+
+- Example 03 defaults to `api_path = "openai/v1"`, which is exactly the path the quickstart has
+  already published on the same API Management instance. Two APIs cannot share a path, so following
+  the README as written fails at apply time.
+- The listed outputs omitted `application_insights_instrumentation_key`, which example 03 requires.
+- The template's `model_routes` name `gpt-4.1` and `text-embedding-3-large`; the quickstart deploys
+  `gpt-4.1-mini` and `text-embedding-3-small`. The plan-time pool check catches the mismatch, but the
+  README gave no warning it would.
+
+All three are fixed in the README, which now states the required edits and shows the pricing-map
+generator producing aliases that match the routes.
+
 ---
 
 ## 5. Reproducing this

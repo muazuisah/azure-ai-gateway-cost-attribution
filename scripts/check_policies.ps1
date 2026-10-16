@@ -339,3 +339,28 @@ if ($failed -gt 0) {
     exit 1
 }
 Write-Host "`nAll policy templates render to well-formed XML." -ForegroundColor Green
+
+# ---------------------------------------------------------------------------------------------------
+# Masked-token check
+#
+# Tooling that redacts secrets on the way to a terminal has written its mask back into a source file
+# at least once: "statusCode" was committed as "status" followed by six asterisks, which Terraform
+# rendered into an alert query that Azure then rejected at apply time. Nothing before this point
+# catches it - the file is valid HCL, the plan succeeds, and the break only appears against the live
+# service. A run of three or more asterisks is never legitimate in these file types, so flag it.
+# ---------------------------------------------------------------------------------------------------
+$maskPattern = '\*{3,}'
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$masked = Get-ChildItem -Path $repoRoot -Recurse -File -Include *.tf, *.tftpl, *.xml, *.py, *.ps1, *.json |
+    Where-Object { $_.FullName -notmatch '\\\.git\\|\\\.terraform\\' } |
+    Select-String -Pattern $maskPattern
+
+if ($masked) {
+    Write-Host "`nMasked tokens found - a redaction mask has been written into source:" -ForegroundColor Red
+    foreach ($m in $masked) {
+        Write-Host "       $($m.Path):$($m.LineNumber): $($m.Line.Trim())" -ForegroundColor Red
+    }
+    Write-Host "       restore the original identifier by hand; do not re-copy it from a terminal." -ForegroundColor DarkGray
+    exit 1
+}
+Write-Host "No masked tokens in source." -ForegroundColor Green

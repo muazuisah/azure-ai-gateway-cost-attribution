@@ -505,7 +505,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "cache_economics" {
     # a question that turns on a ratio, not on a precise figure.
     query = <<-KQL
       ${local.ledger_query}
-      | where status****** between (200 .. 299)
+      | where statusCode between (200 .. 299)
       | summarize
           SavedUSD = sum(costAvoidedUSD),
           WriteTokens = sum(cacheWriteTokens),
