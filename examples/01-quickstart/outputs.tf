@@ -33,3 +33,8 @@ output "foundry_accounts" {
   description = "Foundry accounts behind the gateway."
   value       = module.foundry.account_ids
 }
+
+output "foundry_projects" {
+  description = "Foundry projects created on the account, empty unless create_foundry_project = true. The project endpoint is what the Foundry SDK and portal expect, as distinct from the inference endpoint APIM uses."
+  value       = module.foundry.projects
+}

@@ -63,3 +63,9 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "create_foundry_project" {
+  description = "Create a Foundry project on the account. Off by default: APIM only needs the account and its deployments to serve inference, and a project adds a surface that quickstart traffic never touches. Turn it on if you want the project-scoped endpoint used by the Foundry SDK and portal, or intend to use Agent Service or connections."
+  type        = bool
+  default     = false
+}

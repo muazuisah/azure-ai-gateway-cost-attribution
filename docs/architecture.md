@@ -266,6 +266,29 @@ The module exposes thresholds per category so customers can tune to their risk a
 
 When enabled, cache hits are explicitly marked in telemetry (`cacheHit=true`, `estimatedCostUSD=0`) so that they show up as *savings* rather than silently distorting cost attribution.
 
+A correctness caveat governs where it may be switched on: a semantic cache matches on meaning, and a record identifier carries almost none, so prompts that differ only by an order or customer number can be treated as the same question. Measured distances and the reasoning are in [`cost-attribution.md`](cost-attribution.md) §5b. Caller identity is part of the cache key by default so a near-match cannot cross consumers.
+
+#### Foundry accounts and projects
+
+The gateway talks to a Foundry **account** (`kind = "AIServices"`) and its model **deployments**. That is the entire surface inference needs, so it is all the `foundry-models` module creates by default.
+
+A Foundry **project** is a different construct — the workspace that owns the project-scoped endpoint (`https://<subdomain>.services.ai.azure.com/api/projects/<name>`), and the thing Agent Service, evaluations, indexes and connections attach to. APIM never calls it, which is why it is not part of the default topology, and why a gateway deployment works perfectly well without one.
+
+Create projects when the platform you are building is more than an inference proxy:
+
+| You need | Account alone | Project required |
+| --- | --- | --- |
+| Chat, embeddings and the rest of the inference API through APIM | yes | — |
+| The Foundry portal and SDK experience | — | yes |
+| Agent Service threads and tools | — | yes |
+| Connections to AI Search, Storage or Cosmos DB | — | yes |
+| Evaluations and tracing inside Foundry | — | yes |
+
+`projects` and `connections` on the `foundry-models` module cover this. Two details are worth knowing because ARM enforces them:
+
+- A project can only be created on an account with `allowProjectManagement` set. The module derives that flag from whether any project targets the account rather than exposing a second switch, so the two cannot disagree.
+- Connections are created with Entra ID authentication against the account's managed identity, so no key or connection string is held in Terraform state. Creating a connection does **not** grant access — the target resource still needs a role assignment for the identity, such as `Search Index Data Reader`.
+
 ---
 
 ## 4. Layer 2 — Cost attribution

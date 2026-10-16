@@ -201,3 +201,69 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "projects" {
+  description = <<-EOT
+    Foundry projects to create on these accounts. Empty by default: a project is not needed to serve
+    inference through the gateway, which is what this accelerator exists to do, and the account plus
+    its deployments is the whole surface APIM talks to.
+
+    Create one when you need the things that hang off a project rather than an account: the
+    project-scoped endpoint that the Foundry SDK and portal expect
+    (https://<subdomain>.services.ai.azure.com/api/projects/<name>), Agent Service threads, evaluations,
+    or connections to AI Search and Storage.
+
+    * account_key  - Key from `accounts`. The project is created on that account and inherits its region.
+    * display_name - Name shown in the Foundry portal. Defaults to the project key.
+    * is_default   - Marks this project as the account's default. At most one per account.
+  EOT
+  type = map(object({
+    account_key  = string
+    display_name = optional(string)
+    description  = optional(string)
+    is_default   = optional(bool, false)
+    tags         = optional(map(string), {})
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for key, project in var.projects : contains(keys(var.accounts), project.account_key)])
+    error_message = "Every projects[*].account_key must match a key in `accounts`."
+  }
+
+  validation {
+    condition = alltrue([
+      for account_key in distinct([for project in var.projects : project.account_key]) :
+      length([for project in var.projects : project if project.account_key == account_key && project.is_default]) <= 1
+    ])
+    error_message = "At most one project per account can set is_default = true."
+  }
+}
+
+variable "connections" {
+  description = <<-EOT
+    Connections from a Foundry account to other Azure resources, so projects on that account can reach
+    AI Search, Storage or Cosmos DB. Authentication is Entra ID using the account's managed identity,
+    which is why no key or connection string appears here and none is stored in state.
+
+    Creating the connection does not grant access. The account's principal still needs a role on the
+    target - `Search Index Data Reader` on a search service, `Storage Blob Data Contributor` on an
+    account - which the caller assigns using the `accounts[*].principal_id` output.
+
+    * category - Connection type as ARM names it, e.g. AzureAISearch, AzureBlob, CosmosDB.
+    * target   - Endpoint of the resource being connected, not its ARM id.
+    * metadata - Extra properties some categories require, e.g. ApiType or ResourceId.
+  EOT
+  type = map(object({
+    account_key = string
+    category    = string
+    target      = string
+    metadata    = optional(map(string), {})
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for key, conn in var.connections : contains(keys(var.accounts), conn.account_key)])
+    error_message = "Every connections[*].account_key must match a key in `accounts`."
+  }
+}

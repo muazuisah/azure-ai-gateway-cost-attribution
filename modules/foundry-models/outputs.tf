@@ -57,3 +57,27 @@ output "model_catalog" {
     }
   }
 }
+
+output "projects" {
+  description = "Created Foundry projects, keyed by the logical project key. `endpoint` is the project-scoped URL the Foundry SDK expects; `principal_id` is the identity to grant roles to on any resource the project connects to."
+  value = {
+    for key, project in azurerm_cognitive_account_project.this : key => {
+      id           = project.id
+      name         = project.name
+      account_key  = var.projects[key].account_key
+      endpoints    = project.endpoints
+      principal_id = project.identity[0].principal_id
+    }
+  }
+}
+
+output "connections" {
+  description = "Entra ID connections created on the Foundry accounts, keyed by connection name."
+  value = {
+    for key, conn in azurerm_cognitive_account_connection_entra_id.this : key => {
+      id       = conn.id
+      category = conn.category
+      target   = conn.target
+    }
+  }
+}

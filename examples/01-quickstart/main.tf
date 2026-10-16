@@ -70,6 +70,18 @@ module "foundry" {
     }
   }
 
+  # A project is not required to serve inference through the gateway, so this stays empty unless you
+  # ask for one. Set create_foundry_project = true to get the project-scoped endpoint that the
+  # Foundry SDK and portal expect, and the surface Agent Service and connections attach to.
+  projects = var.create_foundry_project ? {
+    default = {
+      account_key  = "primary"
+      display_name = "Gateway quickstart"
+      description  = "Default project for the quickstart Foundry account."
+      is_default   = true
+    }
+  } : {}
+
   # Model versions rot, and they stop being deployable well before they stop serving traffic. Azure
   # marks a version "deprecating" - rejecting new deployments with ServiceModelDeprecating - while the
   # catalogue still advertises an inference date years away. Confirm what is deployable today before

@@ -33,6 +33,12 @@ locals {
   # created in the same apply as these accounts, so its id is unknown at plan time, and Terraform
   # cannot derive for_each keys from an unknown value - it refuses to plan at all.
   private_endpoints_enabled = var.enable_private_endpoints
+
+  # ARM rejects project creation with "Project can only created under AIServices Kind account with
+  # allowProjectManagement set to true", and the flag lives on the account rather than the project.
+  # Deriving it from `projects` instead of exposing a second switch means the two cannot be set
+  # inconsistently: asking for a project is what enables the capability on the account hosting it.
+  accounts_with_projects = toset([for project in var.projects : project.account_key])
 }
 
 resource "azurerm_cognitive_account" "this" {
@@ -54,6 +60,10 @@ resource "azurerm_cognitive_account" "this" {
   # Foundry model catalogue from one account, unlike the legacy kind = "OpenAI".
   kind     = "AIServices"
   sku_name = each.value.sku_name
+
+  # Only on for accounts that actually host a project, so an inference-only account keeps the
+  # smaller surface area.
+  project_management_enabled = contains(local.accounts_with_projects, each.key)
 
   # A custom subdomain is mandatory for Entra ID token authentication and for private endpoints.
   custom_subdomain_name = coalesce(each.value.custom_subdomain_name, "${var.name_prefix}-aif-${each.key}")
@@ -215,4 +225,54 @@ resource "azurerm_monitor_diagnostic_setting" "this" {
       error_message = "enable_diagnostics is true but diagnostics_workspace_id is null. Set the workspace id, or set enable_diagnostics = false."
     }
   }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Foundry projects
+#
+# A project is the workspace construct: it owns the project-scoped endpoint the Foundry SDK and
+# portal use, and it is what Agent Service, evaluations and connections attach to. Inference does
+# not need one, so none is created unless asked for.
+# ------------------------------------------------------------------------------------------------
+resource "azurerm_cognitive_account_project" "this" {
+  for_each = var.projects
+
+  name                 = "${var.name_prefix}-proj-${each.key}"
+  cognitive_account_id = azurerm_cognitive_account.this[each.value.account_key].id
+
+  # A project lives in its account's region. Taking the location from the created account rather
+  # than from input keeps the two from drifting apart.
+  location = azurerm_cognitive_account.this[each.value.account_key].location
+
+  display_name = coalesce(each.value.display_name, each.key)
+  description  = each.value.description
+
+  # Its own identity, separate from the account's, so access a project needs for its connections can
+  # be granted to the project rather than to every project on the account.
+  identity {
+    type = "SystemAssigned"
+  }
+
+  tags = merge(var.tags, each.value.tags, {
+    "accelerator-component" = "foundry-models"
+    "accelerator-role"      = "project"
+  })
+}
+
+# ------------------------------------------------------------------------------------------------
+# Connections to other Azure resources
+#
+# Entra ID only. The key-based variants of this resource exist, and using one would put a secret in
+# state and leave a credential to rotate; the managed identity the account already has removes both
+# problems. Access still has to be granted on the target resource - see the variable description.
+# ------------------------------------------------------------------------------------------------
+resource "azurerm_cognitive_account_connection_entra_id" "this" {
+  for_each = var.connections
+
+  name                 = each.key
+  cognitive_account_id = azurerm_cognitive_account.this[each.value.account_key].id
+
+  category = each.value.category
+  target   = each.value.target
+  metadata = each.value.metadata
 }
