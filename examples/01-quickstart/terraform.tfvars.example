@@ -29,6 +29,11 @@ log_analytics_daily_quota_gb = 5
 # existing_log_analytics_workspace_id = "/subscriptions/.../resourceGroups/platform-rg/providers/Microsoft.OperationalInsights/workspaces/platform-law"
 # existing_application_insights_id    = "/subscriptions/.../resourceGroups/platform-rg/providers/Microsoft.Insights/components/platform-appi"
 
+# A Foundry project is not needed to serve inference through the gateway, so this is off by default.
+# Turn it on to get the project-scoped endpoint the Foundry SDK and portal expect, and the surface
+# that Agent Service and connections to Search or Storage attach to.
+create_foundry_project = false
+
 tags = {
   cost_centre = "CC-1234"
   owner       = "ai-platform@contoso.com"

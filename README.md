@@ -70,6 +70,7 @@ Full detail, including request lifecycle, failover semantics, and the cost model
 | --- | --- |
 | Terraform | >= 1.9 |
 | Azure CLI | >= 2.60 |
+| Python | >= 3.9, for `smoke_test.py` only — it uses the standard library, so there is nothing to install |
 | Azure subscription | Contributor + User Access Administrator on the target resource group |
 
 You also need quota for the Foundry model deployments you intend to create.
@@ -121,11 +122,32 @@ print(resp.choices[0].message.content)
 
 ### Turn on cost attribution
 
-```hcl
-enable_cost_attribution = true
+Cost attribution is not a flag you can add to the quickstart. The gateway will emit the chargeback
+ledger only when it is given a pricing map, and that map — along with the workbook, the saved KQL
+functions and the budget alerts built on top of it — is what
+[`examples/03-cost-attribution`](examples/03-cost-attribution) adds.
+
+Example 03 layers onto a gateway that already exists rather than building its own, so deploy it
+*after* the quickstart and point it at what you just created. The quickstart exports every value it
+needs:
+
+```bash
+cd ../01-quickstart
+terraform output -raw api_management_id
+terraform output -raw resource_group_name
+terraform output -raw application_insights_id
+terraform output foundry_backends          # paste-ready
+terraform output foundry_accounts
+
+cd ../03-cost-attribution
+cp terraform.tfvars.example terraform.tfvars   # paste the values above, then set the pricing map
+terraform init
+terraform apply
 ```
 
-Then `terraform apply`. See [`examples/03-cost-attribution`](examples/03-cost-attribution) for the full configuration, and [`docs/cost-attribution.md`](docs/cost-attribution.md) for the model.
+The pricing map is the part worth your attention: the ledger is only as truthful as the rates you
+give it. See [`docs/cost-attribution.md`](docs/cost-attribution.md) for the model, including why the
+per-request figure is a defensible estimate rather than an invoice.
 
 ---
 

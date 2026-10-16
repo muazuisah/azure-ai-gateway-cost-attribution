@@ -34,6 +34,41 @@ output "foundry_accounts" {
   value       = module.foundry.account_ids
 }
 
+# ---------------------------------------------------------------------------------------------------
+# Hand-off to example 03
+#
+# Cost attribution layers onto a gateway that already exists rather than building its own, so every
+# required input of example 03 that this example owns is exported here. Without these you would be
+# reading resource IDs out of the portal by hand.
+# ---------------------------------------------------------------------------------------------------
+
+output "api_management_id" {
+  description = "Resource ID of the gateway. Example 03 takes this as existing_api_management_id."
+  value       = module.ai_gateway.api_management_id
+}
+
+output "resource_group_name" {
+  description = "Resource group holding the gateway. Example 03 takes this as resource_group_name."
+  value       = azurerm_resource_group.this.name
+}
+
+output "application_insights_instrumentation_key" {
+  description = "Example 03 takes this as application_insights_instrumentation_key."
+  value       = module.observability.application_insights_instrumentation_key
+  sensitive   = true
+}
+
+output "foundry_backends" {
+  description = "Paste-ready value for example 03's foundry_backends variable."
+  value = {
+    for key, account in module.foundry.accounts : key => {
+      inference_url = account.inference_url
+      deployments   = account.deployments
+      description   = "${key}, ${account.location}"
+    }
+  }
+}
+
 output "foundry_projects" {
   description = "Foundry projects created on the account, empty unless create_foundry_project = true. The project endpoint is what the Foundry SDK and portal expect, as distinct from the inference endpoint APIM uses."
   value       = module.foundry.projects
