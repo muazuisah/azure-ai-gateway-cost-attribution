@@ -593,8 +593,10 @@ resource "azurerm_api_management_api_policy" "llm" {
     semantic_cache_max_message_count     = var.semantic_cache_settings.max_message_count
     semantic_cache_duration_seconds      = var.semantic_cache_settings.duration_seconds
     semantic_cache_embeddings_backend_id = var.enable_semantic_cache ? azurerm_api_management_backend.embeddings[0].name : ""
-    enable_eventhub_audit                = var.enable_eventhub_audit
-    audit_logger_name                    = local.audit_logger_name
+
+    semantic_cache_share_across_consumers = var.semantic_cache_settings.share_across_consumers
+    enable_eventhub_audit                 = var.enable_eventhub_audit
+    audit_logger_name                     = local.audit_logger_name
 
     entra_enabled                = local.entra_enabled
     entra_tenant_id              = coalesce(var.caller_authentication.tenant_id, "organizations")

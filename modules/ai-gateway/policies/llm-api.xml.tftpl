@@ -434,6 +434,23 @@
          7. Semantic cache lookup
          Only safe for non-streaming, deterministic-ish requests. High-temperature calls are excluded
          so that callers asking for variety still get it.
+
+         Read this before enabling the cache on a route.
+
+         A semantic cache matches on *meaning*, and a short identifier carries almost no meaning.
+         "status of order number 10007" and "status of order number 88213" embed to nearly the same
+         vector, so at any threshold loose enough to be useful they are the same question. Measured
+         on this gateway at the default score-threshold of 0.05, the second prompt was served the
+         cached answer naming order 10007 - a confidently wrong answer to a question nobody asked.
+
+         No threshold fixes this. The distance between two record ids is genuinely tiny, so a value
+         low enough to separate them is also low enough to miss ordinary paraphrases, which leaves
+         the cache earning nothing. Treat semantic caching as unsuitable for any prompt whose answer
+         depends on an identifier embedded in the text, and enable it per route rather than gateway
+         wide. It pays off on stable, broadly-worded traffic: documentation lookups, FAQs, policy
+         questions, classification of free text.
+
+         vary-by below is the containment for what the threshold cannot solve.
          ============================================================================================ -->
     <choose>
       <when condition='@{
@@ -451,6 +468,19 @@
                                    max-message-count="${semantic_cache_max_message_count}">
           <vary-by>@((string)context.Variables["requestedModel"])</vary-by>
           <vary-by>@((string)context.Variables["consumerProduct"])</vary-by>
+%{ if semantic_cache_share_across_consumers ~}
+          <!-- share_across_consumers = true: every caller in the product draws on one pool of
+               cached answers. Only set this where the traffic is genuinely common knowledge and
+               no response is specific to the caller who asked for it, because a near-match now
+               crosses identities: one consumer can be served an answer produced for another. -->
+%{ else ~}
+          <!-- Caller identity is part of the cache key, so a near-match can never hand one
+               consumer an answer generated for a different one. Without this, the identifier
+               collision described above stops being a wrong answer and becomes a disclosure:
+               two consumers asking about their own records are, to the cache, asking the same
+               question. Costs hit rate, which is the correct trade to make by default. -->
+          <vary-by>@((string)context.Variables["consumerId"])</vary-by>
+%{ endif ~}
         </llm-semantic-cache-lookup>
       </when>
     </choose>

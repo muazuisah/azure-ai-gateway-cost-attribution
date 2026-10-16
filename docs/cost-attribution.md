@@ -272,6 +272,35 @@ Keep it an immediate child of `<outbound>`. Nesting it in a `<choose>` moves the
 
 Response headers `x-ai-cache-hit` and `x-ai-cost-avoided-usd` carry the same two values back to the caller, so a team tuning prompts for cache reuse can measure the effect without waiting on a workbook.
 
+### The third trap: a cache hit can be the wrong answer
+
+Everything above is about measuring a hit correctly. This is about whether the hit should have happened at all, and it is the reason the cache ships disabled.
+
+A semantic cache matches on meaning. A record identifier carries almost no meaning, so the one token that makes a question specific is the one the embedding is least sensitive to. Measured on this gateway with `text-embedding-3-small`:
+
+| Prompt pair | Cosine distance | Hit at the 0.05 default? |
+| --- | --- | --- |
+| "shipping status of order **10007**" vs "order **88213**", bare | 0.121 | no |
+| The same pair as an application actually sends it | **0.036** | **yes** |
+| The same pair behind a one-paragraph system preamble | 0.036 | yes |
+| The same pair behind a three-paragraph preamble | **0.018** | **yes** |
+| "How do I reset my password?" vs "What is the process for resetting my password?" | 0.150 | no |
+| "How do I reset my password?" vs "How do I cancel my subscription?" | 0.532 | no |
+
+Two conclusions follow, and neither is fixable by tuning.
+
+**No threshold separates the cases.** A genuine paraphrase sits at 0.150 — *farther apart* than two different customers (0.109) or two different orders (0.121). Any threshold loose enough to earn hits on paraphrases is loose enough to confuse two records. The orderings overlap, so there is no value to pick.
+
+**Shared context makes it worse, not better.** The distinguishing identifier is diluted by every token the two prompts have in common: the same pair moves from 0.121 to 0.036 to 0.018 as boilerplate grows. Production traffic carries far more system prompt and retrieved context than a bare question, so a real workload is *more* exposed than a test, which is precisely why this survives a casual trial.
+
+Observed consequence: a request asking for order **88213** was answered, confidently and with a `200`, using text naming order **10007**.
+
+The mitigations, in order of how much they actually buy you:
+
+1. **Do not enable the cache on routes whose answers depend on an identifier in the prompt.** This is the only real fix. The cache pays off on stable, broadly worded traffic — documentation lookups, FAQs, policy questions, free-text classification.
+2. **Leave `share_across_consumers = false`** (the default). Caller identity is part of the cache key, so a near-match can never hand one consumer a response generated for another. This converts a potential disclosure into a wrong answer confined to the caller who asked. It does not prevent the wrong answer.
+3. Treat `score_threshold` as a paraphrase-tolerance dial, not a safety control.
+
 ### Consequences for reporting
 
 Summing `estimatedCostUSD` alone across the upgrade to ledger `schemaVersion` 2 will show spend falling while usage holds steady. That is the correction working, not a data loss. To reconstruct what the traffic *would* have cost, sum `estimatedCostUSD + costAvoidedUSD`.

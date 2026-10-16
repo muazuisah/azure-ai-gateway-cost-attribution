@@ -42,12 +42,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 PASS = "PASS"
@@ -339,6 +339,21 @@ def check_cost_headers(headers: Dict[str, str]) -> Result:
     return Result("cost-headers", PASS, "x-ai-estimated-cost-usd={0}".format(raw))
 
 
+# Subjects far enough apart that any two of them are a genuine cache miss for each other. Picking
+# one at random per run keeps repeat runs independent without relying on an identifier, which an
+# embedding model barely registers.
+_CACHE_PROBES = [
+    ("the common wombat", "describe the burrowing behaviour of"),
+    ("Baroque counterpoint", "summarise the defining harmonic feature of"),
+    ("the Mariana Trench", "state the approximate maximum depth of"),
+    ("sourdough fermentation", "explain the role of wild yeast in"),
+    ("the Antikythera mechanism", "state the astronomical purpose of"),
+    ("ceramic brake discs", "explain the main advantage of"),
+    ("the Hanseatic League", "summarise the commercial purpose of"),
+    ("tidal locking", "explain in plain terms the cause of"),
+]
+
+
 def check_semantic_cache(gw: Gateway, model: str) -> Result:
     """The one capability whose correctness cannot be read off the response body.
 
@@ -347,7 +362,14 @@ def check_semantic_cache(gw: Gateway, model: str) -> Result:
     those counts charges full price for a model that never ran. This asserts the opposite: that the
     second identical prompt is marked as a hit, costs nothing, and reports what it avoided.
     """
-    prompt = "Name the seven colours of the rainbow in order, {0}.".format(uuid.uuid4())
+    # The priming prompt has to be one the cache has genuinely never seen, and a GUID does not
+    # achieve that. A random identifier is nearly meaningless to an embedding model, so a prompt
+    # made unique only by a GUID lands within the match radius of the previous run's prompt and is
+    # served from the cache. The check then fails on a second run against a warm cache while passing
+    # on the first, which reads like flakiness and is not. Uniqueness has to come from the content:
+    # a different subject each run puts real distance between this prompt and every stored one.
+    subject, question = random.choice(_CACHE_PROBES)
+    prompt = "In exactly one sentence and with no preamble, {0} {1}?".format(question, subject)
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],

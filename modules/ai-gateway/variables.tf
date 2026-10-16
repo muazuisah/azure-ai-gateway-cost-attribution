@@ -566,7 +566,7 @@ variable "content_safety_thresholds" {
 # ---------------------------------------------------------------------------------------------------
 
 variable "enable_semantic_cache" {
-  description = "Enable llm-semantic-cache-lookup and llm-semantic-cache-store. Requires an external RediSearch-compatible cache; off by default because the cache costs money and only pays back on workloads with repetitive prompts."
+  description = "Enable llm-semantic-cache-lookup and llm-semantic-cache-store. Requires an external RediSearch-compatible cache. Off by default on both cost and correctness grounds: it only pays back on repetitive prompts, and it matches on meaning, so prompts that differ only by a record id are the same question to it. Enable it per route, on traffic whose answers do not depend on an identifier in the text. See docs/cost-attribution.md."
   type        = bool
   default     = false
 }
@@ -594,17 +594,26 @@ variable "semantic_cache_settings" {
   description = <<-EOT
     Cache tuning.
 
-    * score_threshold  - Maximum vector distance for a hit. Lower is stricter. 0.05 is conservative;
-                         values above roughly 0.2 start returning answers to different questions.
+    * score_threshold  - Maximum vector distance for a hit. Lower is stricter. No value makes the
+                         cache safe for prompts distinguished by an identifier: measured on this
+                         gateway at 0.05, "status of order number 88213" was served the cached
+                         answer naming order 10007. Tune this for paraphrase tolerance on broadly
+                         worded traffic, not as a correctness control.
     * duration_seconds - Time to live for a cached completion.
     * max_temperature  - Requests above this temperature bypass the cache, so callers who asked for
                          variety still get it.
+    * share_across_consumers
+                       - false (default) adds caller identity to the cache key, so a near-match can
+                         never serve one consumer a response generated for another. Set true only
+                         for genuinely common knowledge, where no answer is specific to the caller
+                         who asked for it; it raises the hit rate and accepts cross-consumer reuse.
   EOT
   type = object({
-    score_threshold   = optional(number, 0.05)
-    duration_seconds  = optional(number, 3600)
-    max_message_count = optional(number, 10)
-    max_temperature   = optional(number, 0.3)
+    score_threshold        = optional(number, 0.05)
+    duration_seconds       = optional(number, 3600)
+    max_message_count      = optional(number, 10)
+    max_temperature        = optional(number, 0.3)
+    share_across_consumers = optional(bool, false)
   })
   default = {}
 

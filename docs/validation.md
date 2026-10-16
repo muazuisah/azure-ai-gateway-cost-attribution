@@ -290,6 +290,58 @@ After the fix, the same replay reports `cacheHit: true`, recovers all 39 tokens 
 prices at `0.00000000`, and records `costAvoidedUSD` equal to the original call's cost — in 273 ms
 against 2887 ms.
 
+### 14. The semantic cache answers questions it was never asked
+
+Found by running the smoke suite **a second time**. The first run passed 12/12; the re-run failed.
+Nothing had changed except that the cache was now warm, which is the normal state of a cache and the
+state no first deployment is ever in.
+
+The suite made its priming prompt unique with a GUID. That is not uniqueness. An embedding model
+barely registers a random identifier, so the prompt landed inside the match radius of the previous
+run's prompt and was served from the cache. Fixing the probe exposed the real defect underneath.
+
+A controlled pair on a never-before-seen template:
+
+```
+"For internal ledger 42074, ... shipping status of order number 10007 ..."  -> hit=false, cost 0.00004360
+"For internal ledger 42074, ... shipping status of order number 88213 ..."  -> hit=true,  cost 0.00000000
+   body returned: "The shipping status of order number 10007 ..."
+```
+
+A question about order **88213** was answered with text about order **10007**, confidently, behind a
+`200`. `cacheHit` itself was verified accurate — novel prompts still price and meter correctly — so
+this is the cache matching, not the measurement failing.
+
+Measuring the embedding distances explains why, and shows that no threshold fixes it:
+
+| Prompt pair | Cosine distance |
+| --- | --- |
+| order 10007 vs 88213, bare | 0.121 |
+| the same pair as actually sent | **0.036** |
+| the same pair behind a three-paragraph preamble | **0.018** |
+| "How do I reset my password?" vs "What is the process for resetting my password?" | 0.150 |
+| "How do I reset my password?" vs "How do I cancel my subscription?" | 0.532 |
+
+A genuine paraphrase (0.150) is **farther apart** than two different orders (0.121) or two different
+customers (0.109). The two populations overlap, so no threshold admits paraphrases while rejecting
+different records. Worse, shared context dilutes the distinguishing token: the same pair falls from
+0.121 to 0.018 as boilerplate grows, so production traffic — heavy with system prompts and retrieved
+context — is *more* exposed than a test, which is why this survives casual trial.
+
+Three changes, none of which is a threshold:
+
+- `<vary-by>` now includes caller identity by default (`share_across_consumers = false`), so a
+  near-match can never serve one consumer a response generated for another. This was the serious
+  half: without it the collision crosses tenants and becomes a disclosure rather than a wrong answer.
+- The guidance was corrected. Both `variables.tf` files claimed 0.05 was conservative and that "above
+  roughly 0.2" was where trouble started. The default itself was already returning wrong answers.
+- The suite now derives its priming prompt from randomly chosen subject matter, so repeat runs are
+  genuinely independent. Verified by running it twice back to back against a warm cache: 12/12 both
+  times.
+
+The residual risk is documented rather than fixed, because it cannot be fixed by configuration: do
+not enable semantic caching on routes whose answers depend on an identifier in the prompt.
+
 ---
 
 ## 5. Reproducing this

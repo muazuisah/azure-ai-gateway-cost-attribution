@@ -258,12 +258,13 @@ variable "semantic_cache_embeddings_backend" {
 }
 
 variable "semantic_cache_settings" {
-  description = "Cache behaviour. score_threshold is the similarity distance below which a stored response is reused - lower is stricter, and values above 0.2 start returning answers to questions that were not asked. max_temperature suppresses caching for requests that asked for variety."
+  description = "Cache behaviour. score_threshold is the similarity distance below which a stored response is reused - lower is stricter, but no value makes the cache safe for prompts told apart by an identifier, because two record ids embed to almost the same vector. max_temperature suppresses caching for requests that asked for variety. share_across_consumers = false keeps caller identity in the cache key so a near-match cannot serve one consumer another's response."
   type = object({
-    max_temperature   = optional(number, 0.3)
-    score_threshold   = optional(number, 0.05)
-    max_message_count = optional(number, 10)
-    duration_seconds  = optional(number, 3600)
+    max_temperature        = optional(number, 0.3)
+    score_threshold        = optional(number, 0.05)
+    max_message_count      = optional(number, 10)
+    duration_seconds       = optional(number, 3600)
+    share_across_consumers = optional(bool, false)
   })
   default = {}
 

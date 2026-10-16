@@ -60,6 +60,7 @@ $llmApiBaseline = [ordered]@{
     semantic_cache_max_message_count     = '10'
     semantic_cache_duration_seconds      = '3600'
     semantic_cache_embeddings_backend_id = '"foundry-eastus"'
+    semantic_cache_share_across_consumers = 'false'
     entra_enabled                        = 'false'
     entra_tenant_id                      = '"organizations"'
     entra_header_name                    = '"Authorization"'
@@ -128,6 +129,14 @@ $cases = @(
         Expr = New-LlmApiExpr @{
             enable_semantic_cache                = 'false'
             semantic_cache_embeddings_backend_id = '""'
+        }
+    },
+    @{
+        # Semantic cache with the consumer partition deliberately removed. The two vary-by variants
+        # are separate template branches, so the shared one is never rendered by any other case.
+        Name = 'llm-api-cache-shared'
+        Expr = New-LlmApiExpr @{
+            semantic_cache_share_across_consumers = 'true'
         }
     },
     @{
