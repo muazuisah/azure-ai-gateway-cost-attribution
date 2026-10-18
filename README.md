@@ -179,7 +179,7 @@ per-request figure is a defensible estimate rather than an invoice.
 ## Proof it works
 
 This is not a design sketch. Both examples were deployed to a real subscription, driven with real
-traffic, and measured. The full write-up — method, raw results, and the sixteen defects that only a live
+traffic, and measured. The full write-up — method, raw results, and the seventeen defects that only a live
 deployment could surface — is in [`docs/validation.md`](docs/validation.md).
 
 **Chargeback ledger, queried from a running deployment:** four consumers across three products, two

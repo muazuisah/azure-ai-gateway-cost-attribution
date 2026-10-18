@@ -392,6 +392,32 @@ first-time user:
 All three are fixed in the README, which now states the required edits and shows the pricing-map
 generator producing aliases that match the routes.
 
+### 17. Two gateways on one API Management instance collided
+
+With the path and the routes corrected, the apply still failed:
+
+```
+a resource with the ID ".../backends/foundry-primary" already exists -
+to be managed via Terraform this resource needs to be imported into the State
+```
+
+The module named its Foundry backends `foundry-<key>`, its pools `pool-<alias>`, and its content
+safety backend `content-safety` — none of them prefixed. Backends live in the API Management
+instance's namespace, not in a resource group, so the name is only unique per instance. Example 01
+had already created `foundry-primary` from the same map key, and example 03 tried to create it again.
+
+This broke the module's headline use case. "Layer onto API Management you already own" only worked as
+long as that instance was not already running this module — which is exactly what the README tells you
+to do.
+
+Named values and loggers were already prefixed with `name_prefix`; the backends had simply been
+missed, and nothing caught it because every deployment until now put one gateway on one instance.
+All four names are now prefixed, and the route table the policy reads was updated to match.
+
+This is a **breaking change** for existing deployments: renaming a backend replaces it. Expect
+Terraform to destroy and recreate the backends and pools on the next apply, which briefly interrupts
+traffic. Nothing else is affected — the API, its policy and the subscription keys are untouched.
+
 ---
 
 ## 5. Reproducing this

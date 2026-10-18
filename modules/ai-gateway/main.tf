@@ -65,7 +65,7 @@ locals {
   # -------------------------------------------------------------------------------------------------
   routes_payload = {
     for alias, route in var.model_routes : alias => {
-      pool        = "pool-${alias}"
+      pool        = "${var.name_prefix}-pool-${alias}"
       deployment  = route.deployment
       description = coalesce(route.description, "")
     }
@@ -73,6 +73,10 @@ locals {
 
   # Base64 rather than raw JSON. A named value is substituted verbatim into the surrounding C# string
   # literal in the policy expression, so raw JSON would terminate that literal on its first quote.
+  # Backends, pools and named values live in the API Management instance's own namespace, not in a
+  # resource group, so two deployments of this module onto one instance collide unless every name they
+  # invent is prefixed. That is not a hypothetical: layering example 03 onto the gateway built by
+  # example 01 is the documented path, and an unprefixed "foundry-<key>" made it fail.
   routes_named_value_name  = "${var.name_prefix}-model-routes"
   pricing_named_value_name = "${var.name_prefix}-model-pricing"
   environment_named_value  = "${var.name_prefix}-environment"
@@ -395,7 +399,7 @@ resource "azurerm_api_management_backend" "foundry" {
   # scheme, and foundry_backends validates that every inference_url matches ^https://. Setting this to
   # "https" would simply be rejected by the provider.
 
-  name                = "foundry-${each.key}"
+  name                = "${var.name_prefix}-foundry-${each.key}"
   resource_group_name = local.apim_rg
   api_management_name = local.apim_name
   protocol            = "http"
@@ -435,7 +439,7 @@ resource "azurerm_api_management_backend" "embeddings" {
 
   # checkov:skip=CKV_AZURE_215:As above, "protocol" selects http vs soap and is unrelated to TLS.
 
-  name                = "foundry-embeddings"
+  name                = "${var.name_prefix}-foundry-embeddings"
   resource_group_name = local.apim_rg
   api_management_name = local.apim_name
   protocol            = "http"
@@ -455,7 +459,7 @@ resource "azapi_resource" "model_pool" {
   for_each = var.model_routes
 
   type      = "Microsoft.ApiManagement/service/backends@2024-06-01-preview"
-  name      = "pool-${each.key}"
+  name      = "${var.name_prefix}-pool-${each.key}"
   parent_id = local.apim_id
 
   body = {
@@ -489,7 +493,7 @@ resource "azurerm_api_management_backend" "content_safety" {
   # checkov:skip=CKV_AZURE_215:As above, "protocol" selects http vs soap and is unrelated to TLS.
   # content_safety_endpoint is validated to be https.
 
-  name                = "content-safety"
+  name                = "${var.name_prefix}-content-safety"
   resource_group_name = local.apim_rg
   api_management_name = local.apim_name
   protocol            = "http"
