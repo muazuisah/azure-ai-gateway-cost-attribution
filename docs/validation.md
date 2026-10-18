@@ -418,6 +418,46 @@ This is a **breaking change** for existing deployments: renaming a backend repla
 Terraform to destroy and recreate the backends and pools on the next apply, which briefly interrupts
 traffic. Nothing else is affected — the API, its policy and the subscription keys are untouched.
 
+### 18. A duplicate display name hung the apply for thirty minutes
+
+With the backends namespaced, the apply got further and then stopped dead:
+
+```
+azurerm_api_management_api.llm: Still creating... [12m30s elapsed]
+...
+Error: creating Api: HTTP response was nil; connection may have been reset
+```
+
+The API never appeared in the portal. Everything about the message pointed at the network, and
+nothing about it was true.
+
+Running the apply targeted, with `TF_LOG=DEBUG`, showed the provider issuing the same PUT over and
+over with exponential backoff — 2s, 4s, 8s, up to 63s — and never logging a response. Pulling the
+exact 406-byte request body out of the debug log and replaying it by hand with `az rest` produced
+what the provider was hiding: **502 Bad Gateway**, with an HTML body. The provider classifies 502 as
+transient, so it retried until the thirty-minute create timeout expired.
+
+Bisecting the body isolated the field:
+
+| Probe | `displayName`                     | Result |
+| ----- | --------------------------------- | ------ |
+| `pa`  | unique, full provider body        | 201    |
+| `pb`  | unique, minimal body              | 201    |
+| `pc`  | `AI Gateway (dev)` — already used | **502** |
+
+API Management rejects a duplicate API display name on an instance with 502 rather than 409. The
+module hardcoded `display_name = "AI Gateway (${var.environment_name})"`, so any two deployments in
+the same environment collided — the same single-instance assumption as defect 17, surfacing as a
+hang instead of an error.
+
+The default is now `AI Gateway (<name_prefix>)`, which fix 17 already guarantees to be unique per
+instance, and `api_display_name` overrides it.
+
+Probing further showed **products behave identically**: a second product reusing an existing display
+name also returns 502. Examples 01 and 03 ship different product names, so it had never been hit.
+Product display names now default to the key qualified by `name_prefix`. That is an in-place update,
+not a replacement, so existing deployments see a rename and nothing more.
+
 ---
 
 ## 5. Reproducing this

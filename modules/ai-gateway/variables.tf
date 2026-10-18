@@ -297,6 +297,8 @@ variable "products" {
     Commercial tiers published by the gateway. Each product carries its own token rate limit and
     period quota, enforced per subscribing application.
 
+    * display_name        - Portal name. Defaults to the key plus name_prefix, because display names
+                            must be unique across the API Management instance.
     * tokens_per_minute   - Rate ceiling. Breaching it returns 429 with Retry-After. Null disables.
     * token_quota         - Tokens allowed per token_quota_period. Breaching it returns 403. Null disables.
     * token_quota_period  - Hourly, Daily, Weekly, Monthly or Yearly.
@@ -390,6 +392,12 @@ variable "api_path" {
   description = "Path segment the API is published under. The default makes the gateway a drop-in replacement for a Foundry endpoint, so an OpenAI SDK only needs its base_url changed."
   type        = string
   default     = "openai/v1"
+}
+
+variable "api_display_name" {
+  description = "Display name for the gateway API in the portal. Defaults to \"AI Gateway (<name_prefix>)\". It must be unique across the API Management instance: a duplicate is rejected with 502 Bad Gateway, which Terraform retries for thirty minutes before failing with a timeout that says nothing about the cause."
+  type        = string
+  default     = null
 }
 
 variable "enable_responses_api" {

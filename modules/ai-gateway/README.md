@@ -112,7 +112,8 @@ The indirection is the point — see [ADR-0006](../../docs/decisions/0006-alias-
 | `foundry_account_ids` | `map(string)` | `{}` | Foundry account resource IDs keyed by backend name. The module grants its managed identity **Cognitive Services User** on each. Leave empty if role assignments are managed by a platform team. |
 | `enforce_deployment_parity` | `bool` | `true` | Validates at plan time that every alias resolves to a deployment present on **every** backend in its pool. |
 | `circuit_breaker` | `object` | `{}` | Trip conditions and duration. |
-| `api_path` | `string` | `"openai/v1"` | Path the API is published under. |
+| `api_path` | `string` | `"openai/v1"` | Path the API is published under. Unique per instance. |
+| `api_display_name` | `string` | `null` | Portal name for the API. Defaults to `AI Gateway (<name_prefix>)`. Must be unique per instance. |
 | `enable_responses_api` | `bool` | `true` | Publish the Responses API operations alongside chat completions. |
 | `forward_timeout_seconds` | `number` | `240` | Backend timeout. Generous by default because long completions are legitimately slow. |
 | `buffer_response` | `bool` | `false` | Leave `false` to preserve token-by-token streaming. |

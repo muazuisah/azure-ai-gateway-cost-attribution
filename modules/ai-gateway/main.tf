@@ -526,10 +526,14 @@ resource "azurerm_api_management_api" "llm" {
   resource_group_name = local.apim_rg
   api_management_name = local.apim_name
   revision            = "1"
-  display_name        = "AI Gateway (${var.environment_name})"
-  description         = "Centralised OpenAI-compatible entry point for Microsoft Foundry model deployments."
-  path                = var.api_path
-  protocols           = ["https"]
+  # Unique per instance, like the resource names above, because API Management rejects a duplicate
+  # display name with 502 Bad Gateway rather than a conflict. The provider reasonably treats 502 as
+  # transient and retries until its timeout, so the symptom is a thirty-minute hang that never names
+  # the cause. The default therefore carries name_prefix, not just the environment.
+  display_name = coalesce(var.api_display_name, "AI Gateway (${var.name_prefix})")
+  description  = "Centralised OpenAI-compatible entry point for Microsoft Foundry model deployments."
+  path         = var.api_path
+  protocols    = ["https"]
 
   # False only in entra_id mode, where the Entra token is the sole credential. In "both" mode the key
   # is still required: it is what lets APIM resolve the product, and the product is what carries token
@@ -636,8 +640,10 @@ resource "azurerm_api_management_product" "this" {
   product_id          = each.key
   api_management_name = local.apim_name
   resource_group_name = local.apim_rg
-  display_name        = coalesce(each.value.display_name, title(replace(each.key, "-", " ")))
-  description         = each.value.description
+  # Product display names share the API uniqueness rule, and a duplicate fails the same unhelpful way,
+  # so the default is qualified by name_prefix. Set display_name explicitly to override it.
+  display_name = coalesce(each.value.display_name, "${title(replace(each.key, "-", " "))} (${var.name_prefix})")
+  description  = each.value.description
 
   subscription_required = each.value.subscription_required
   approval_required     = each.value.subscription_required ? each.value.approval_required : null
