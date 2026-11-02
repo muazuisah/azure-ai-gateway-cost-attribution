@@ -169,6 +169,43 @@ cache_write_premium_usd_per_million = 0.25
 
 alert_emails = ["finops@contoso.com", "ai-platform@contoso.com"]
 
+# ---------------------------------------------------------------------------------------------------
+# Individual attribution (docs/obo-integration.md)
+#
+# Applications call the gateway with an on-behalf-of token for the signed-in user. The application is
+# still the first level of attribution; the user's object id becomes the second. Leave
+# caller_tenant_id unset to stay on subscription keys, which can only ever name an application.
+# ---------------------------------------------------------------------------------------------------
+# caller_tenant_id              = "00000000-0000-0000-0000-000000000000"
+# caller_audiences              = ["api://contoso-ai-gateway"]
+# caller_client_application_ids = ["11111111-1111-1111-1111-111111111111"]
+# caller_consumer_names = {
+#   "11111111-1111-1111-1111-111111111111" = "customer-support-copilot"
+# }
+#
+# user_attribution = {
+#   enabled                    = true
+#   require_delegated          = false # true once every application sends OBO tokens
+#   tokens_per_minute_per_user = 20000
+#   token_quota_per_user       = 2000000
+#   token_quota_period         = "Daily"
+# }
+#
+# Needed for streamed responses: the built-in LLM logs are the only record of what they consumed.
+# log_analytics_workspace_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-ai-platform-prod/providers/Microsoft.OperationalInsights/workspaces/contoso-law"
+#
+# Labels only. Anyone not listed is still attributed, by object id.
+# users = {
+#   "22222222-2222-2222-2222-222222222222" = {
+#     display_name = "Ada Lovelace"
+#     department   = "Claims"
+#     cost_centre  = "CC-1001"
+#   }
+# }
+#
+# daily_user_spend_threshold_usd      = 50
+# unattributed_user_threshold_percent = 10
+
 enable_eventhub_audit = false
 
 tags = {

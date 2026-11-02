@@ -145,6 +145,26 @@ ledger work identically in all three auth modes; see
 This section contains the `Dictionary&lt;string, string&gt;` declaration that
 rule 2 below exists to explain.
 
+### §1c — Individual (user) attribution (conditional)
+
+Emitted when `caller_authentication.user_attribution.enabled` is set, which
+requires an Entra mode. It reads the person behind an On-Behalf-Of token from
+the token §1b already validated, so the user identity carries the same weight
+as the application identity — no header the caller controls is consulted.
+
+* `userType` is `delegated` when the token carries `scp` or `idtyp = user`,
+  otherwise `app`. An app-only token's `oid` is a service principal and is
+  deliberately not recorded as a user.
+* `userId` is the configured `user_claim` (default `oid`), `none` for an
+  app-only token, or `unresolved` for a delegated token missing the claim.
+* `userTenantId` is the `tenant_claim` (default `tid`).
+* With `require_delegated`, anything that is not a delegated token with a
+  resolved user is refused with `403 delegated_token_required`.
+
+When user attribution is off the same three variables are set to `none`, so the
+ledger schema is identical either way. See
+[ADR-0009](decisions/0009-individual-attribution-obo.md).
+
 ### §2 — Model discovery
 
 A short-circuit for `GET /models`. The gateway answers it itself from the
@@ -197,6 +217,17 @@ is explained in [§4 Metric cardinality](#4-metric-cardinality-is-a-hard-ceiling
 ### §5b — Gateway-wide token limit (conditional)
 
 Described in §1 above. Emitted only in the Entra modes.
+
+### §5c — Per-user token limit (conditional)
+
+Emitted when `tokens_per_minute_per_user` or `token_quota_per_user` is set. An
+`llm-token-limit` keyed on `consumerId:userId`, applied only to delegated
+tokens, so one person cannot exhaust a shared application's allowance and their
+use of one application does not consume their allowance in another. It reports
+through `x-ai-user-tokens-consumed` and `x-ai-user-tokens-remaining`, distinct
+from the application-level headers, so a caller can tell which limit a `429`
+came from. With `partition_cache_by_user`, §7 also varies the semantic cache by
+`userId`, so one user's cached answer is never served to another.
 
 ### §6 — Content safety (conditional)
 
@@ -317,7 +348,11 @@ Nothing is lost by skipping it. Because of that same `Content-Type` guard, a
 streamed request never produced usage here in the first place — the buffering
 was pure cost. Streamed requests are recorded `usageMeasured = false` and their
 token counts come from `llm-emit-token-metric`, which reads the final SSE chunk
-natively.
+natively. For the ledger, the gateway module enables API Management's LLM logs
+(`enable_llm_logs`), which meter the stream without the policy reading it; the
+cost-attribution module joins `ApiManagementGatewayLlmLog` to the ledger on
+`requestId` and backfills the tokens and cost. See
+[cost-attribution.md §3b](cost-attribution.md#3b-individual-attribution).
 
 The general rule, if you extend this policy: **anything that inspects the
 response body must be skipped for streaming requests, not merely guarded inside
@@ -339,7 +374,9 @@ cost. Three details are worth knowing:
   differently-localised gateway.
 * The section writes the ledger: a `<trace source="ai-gateway">` entry whose
   metadata fields are the schema every alert and the workbook derive from, and
-  a response header `x-ai-estimated-cost-usd` formatted `F8`.
+  a response header `x-ai-estimated-cost-usd` formatted `F8`. The ledger is
+  `schemaVersion` 3: version 3 added `requestId` (the join key for the
+  streaming backfill) and `userId`, `userTenantId` and `userType` (§1c).
 
 When `enable_eventhub_audit` is set, the section closes by writing the **same
 record a second time** through `<log-to-eventhub>`, as one compact JSON object
@@ -362,7 +399,8 @@ audit stream silently drifts from the record everyone else is reading.
 ### §12 — Governance headers and scrubbing
 
 Adds the `x-ai-*` response headers the operator and the caller use (model
-alias, token counts, remaining quota, estimated cost) and deletes three
+alias, token counts, remaining quota, estimated cost, and with user
+attribution `x-ai-user` — the user's object id, `app` or `unresolved`) and deletes three
 upstream headers — `x-ms-region`, `azureml-model-session` and
 `apim-request-id` — that leak backend topology to the caller.
 
@@ -393,6 +431,7 @@ difference as far as policy is concerned.
 | `tokens_per_minute` required | no | yes | yes |
 | Ledger `consumer` resolves to | subscription id | Entra claim | Entra claim |
 | `x-ai-product` response header present | yes | yes | **no** |
+| §1c user attribution available | no | yes | yes |
 
 That last row is a useful field diagnostic. If you believe you are in `both`
 mode but responses carry no `x-ai-product` header, the product scope is not

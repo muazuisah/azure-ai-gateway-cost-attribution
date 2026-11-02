@@ -40,7 +40,8 @@ Answer "what did each application spend on AI last month?" — defensibly.
 - Per-request token accounting across **input, cached input, cache write, output, and reasoning** token classes.
 - Cost rates generated from the **Azure Retail Prices API**, expressed per 1 000 000 tokens, versioned with `effectiveDate`.
 - **Ratio allocation against Azure Cost Management** — gateway telemetry decides *who*, Azure decides *how much*. Immune to EA discounts, reservations, and PTU amortization.
-- A chargeback workbook, per-product budgets, and alerts for **unpriced models**, untiered long-context requests, unmeasured usage, product overspend, and telemetry gaps — the conditions that silently corrupt a chargeback number.
+- **Per-user attribution** from Entra On-Behalf-Of tokens: spend is split per application and then per signed-in user, with streamed requests costed from API Management's LLM logs rather than buffered. See the [OBO integration guide](docs/obo-integration.md).
+- A chargeback workbook, per-product budgets, and alerts for **unpriced models**, untiered long-context requests, unmeasured usage, product overspend, per-user overspend, unattributed users, and telemetry gaps — the conditions that silently corrupt a chargeback number.
 
 ---
 

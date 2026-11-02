@@ -71,6 +71,14 @@ $llmApiBaseline = [ordered]@{
     entra_claim_order                    = '["appid","azp","oid","sub"]'
     entra_consumer_names                 = '{}'
     entra_gateway_token_limit            = 'null'
+    user_attribution_enabled             = 'false'
+    user_claim                           = '"oid"'
+    user_tenant_claim                    = '"tid"'
+    user_require_delegated               = 'false'
+    user_tokens_per_minute               = 'null'
+    user_token_quota                     = 'null'
+    user_token_quota_period              = '"Daily"'
+    user_partition_cache                 = 'false'
     enable_eventhub_audit                = 'true'
     audit_logger_name                    = '"audit-logger"'
 }
@@ -163,6 +171,36 @@ $cases = @(
             entra_required_claims     = '[{ name = "roles", match = "any", separator = null, values = ["Gateway.Invoke"] }, { name = "groups", match = "all", separator = " ", values = ["g1","g2"] }]'
             entra_claim_order         = '["appid","oid"]'
             entra_gateway_token_limit = '200000'
+        }
+    },
+    @{
+        # Individual attribution with every user control on: OBO user resolution, delegated-only
+        # enforcement, a per-user rate and quota, and the user cache partition.
+        Name = 'llm-api-user-attribution'
+        Expr = New-LlmApiExpr @{
+            entra_enabled                = 'true'
+            entra_tenant_id              = '"00000000-0000-0000-0000-000000000001"'
+            entra_audiences              = '["api://ai-gateway"]'
+            user_attribution_enabled     = 'true'
+            user_require_delegated       = 'true'
+            user_tokens_per_minute       = '20000'
+            user_token_quota             = '500000'
+            user_partition_cache         = 'true'
+        }
+    },
+    @{
+        # Individual attribution with only a per-user rate (no quota, no delegated-only enforcement,
+        # no cache, no audit stream), so each optional user block renders independently.
+        Name = 'llm-api-user-attribution-minimal'
+        Expr = New-LlmApiExpr @{
+            entra_enabled                = 'true'
+            entra_tenant_id              = '"00000000-0000-0000-0000-000000000001"'
+            entra_audiences              = '["api://ai-gateway"]'
+            user_attribution_enabled     = 'true'
+            user_tokens_per_minute       = '20000'
+            enable_eventhub_audit        = 'false'
+            enable_semantic_cache        = 'false'
+            semantic_cache_embeddings_backend_id = '""'
         }
     },
     @{

@@ -122,6 +122,86 @@
     <set-variable name="consumerName" value='@((string)context.Variables["consumerId"])' />
 %{ endif ~}
 
+%{ if user_attribution_enabled ~}
+    <!-- ============================================================================================
+         1c. Individual (user) attribution
+
+         Consuming applications call the gateway with an On-Behalf-Of token: a delegated token the app
+         obtained for its signed-in user. In that token appid/azp is still the calling application, so
+         the consumer above is unchanged, and the user is the token's object id. Two levels of
+         attribution therefore come from one validated credential, and neither can be spoofed by a
+         header.
+
+         Only a delegated token names a person. An app-only token's oid is the calling service
+         principal, so it is recorded as userType "app" with no user rather than being mistaken for
+         one. A token is delegated when it carries scopes (scp) or declares idtyp = user.
+
+         The object id is used, never the UPN or e-mail: it is immutable, survives renames, and is not
+         itself personal contact data. Resolving it to a name is a reporting-time join.
+         ============================================================================================ -->
+    <set-variable name="userType" value='@{
+        var jwt = (Jwt)context.Variables["entraToken"];
+        var idtyp = jwt.Claims.GetValueOrDefault("idtyp", string.Empty);
+        if (string.Equals(idtyp, "app", StringComparison.OrdinalIgnoreCase))
+        {
+            return "app";
+        }
+        var scp = jwt.Claims.GetValueOrDefault("scp", string.Empty);
+        if (!string.IsNullOrEmpty(scp) || string.Equals(idtyp, "user", StringComparison.OrdinalIgnoreCase))
+        {
+            return "delegated";
+        }
+        return "app";
+    }' />
+    <set-variable name="userId" value='@{
+        if ((string)context.Variables["userType"] != "delegated")
+        {
+            return "none";
+        }
+        var jwt = (Jwt)context.Variables["entraToken"];
+        var value = jwt.Claims.GetValueOrDefault("${user_claim}", string.Empty);
+        return string.IsNullOrEmpty(value) ? "unresolved" : value;
+    }' />
+    <set-variable name="userTenantId" value='@{
+        if ((string)context.Variables["userType"] != "delegated")
+        {
+            return "none";
+        }
+        var jwt = (Jwt)context.Variables["entraToken"];
+        var value = jwt.Claims.GetValueOrDefault("${user_tenant_claim}", string.Empty);
+        return string.IsNullOrEmpty(value) ? "none" : value;
+    }' />
+%{ if user_require_delegated ~}
+    <!-- require_delegated: every request must carry a person. An app-only token would be spend that
+         can never be attributed below the application, so it is refused rather than recorded. -->
+    <choose>
+      <when condition='@((string)context.Variables["userType"] != "delegated" || (string)context.Variables["userId"] == "unresolved")'>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>@{
+              return new JObject(
+                new JProperty("error", new JObject(
+                  new JProperty("code", "delegated_token_required"),
+                  new JProperty("message", "This gateway requires a delegated (On-Behalf-Of) user token. App-only tokens are not accepted."),
+                  new JProperty("correlationId", context.RequestId.ToString())
+                ))
+              ).ToString();
+          }</set-body>
+        </return-response>
+      </when>
+    </choose>
+%{ endif ~}
+%{ else ~}
+    <!-- User attribution is off. The fields are still set so the ledger schema is identical either
+         way and reports never have to special-case a missing column. -->
+    <set-variable name="userType" value='@("none")' />
+    <set-variable name="userId" value='@("none")' />
+    <set-variable name="userTenantId" value='@("none")' />
+%{ endif ~}
+
     <!-- ============================================================================================
          2. Model discovery
          GET /models answers from the gateway's own catalogue. Clients and agent frameworks use it to
@@ -329,6 +409,37 @@
         remaining-tokens-header-name="x-ai-tokens-remaining" />
 %{ endif ~}
 
+%{ if user_tokens_per_minute != null || user_token_quota != null ~}
+    <!-- ============================================================================================
+         5c. Per-user token limit
+
+         Product and gateway limits cap an application. Behind a shared application, though, one
+         person can still consume the whole allowance. This limit is counted per application and user
+         pair, so the same person using two applications draws on two allowances - each application
+         owner has budgeted for their own users.
+
+         Applied only to delegated tokens; app-only traffic has no user to count against and stays
+         governed by the application-level limits.
+         ============================================================================================ -->
+    <choose>
+      <when condition='@((string)context.Variables["userType"] == "delegated")'>
+        <llm-token-limit
+            counter-key='@((string)context.Variables["consumerId"] + ":" + (string)context.Variables["userId"])'
+%{ if user_tokens_per_minute != null ~}
+            tokens-per-minute="${user_tokens_per_minute}"
+%{ endif ~}
+%{ if user_token_quota != null ~}
+            token-quota="${user_token_quota}"
+            token-quota-period="${user_token_quota_period}"
+%{ endif ~}
+            estimate-prompt-tokens="false"
+            retry-after-header-name="retry-after"
+            tokens-consumed-header-name="x-ai-user-tokens-consumed"
+            remaining-tokens-header-name="x-ai-user-tokens-remaining" />
+      </when>
+    </choose>
+%{ endif ~}
+
     <!-- ============================================================================================
          5b. Acquire the backend credential
          The token is obtained here, before content safety and the cache, rather than immediately
@@ -480,6 +591,11 @@
                two consumers asking about their own records are, to the cache, asking the same
                question. Costs hit rate, which is the correct trade to make by default. -->
           <vary-by>@((string)context.Variables["consumerId"])</vary-by>
+%{ endif ~}
+%{ if user_partition_cache ~}
+          <!-- partition_cache_by_user = true: within an application, one user is never served a
+               completion generated for another. Use when answers draw on what the user can see. -->
+          <vary-by>@((string)context.Variables["userId"])</vary-by>
 %{ endif ~}
         </llm-semantic-cache-lookup>
       </when>
@@ -869,11 +985,17 @@
          trace policy emits nothing and cost tracking silently reports zero. -->
     <trace source="ai-gateway" severity="information">
       <message>@("llm.request " + (string)context.Variables["requestedModel"])</message>
-      <!-- 2, matching the Event Hub ledger below: this trace carries cacheHit and costAvoidedUSD, and
-           estimatedCostUSD means billed rather than modelled cost. A consumer of either stream has to
-           be able to tell the two shapes apart from the record alone, so the two must not drift. -->
-      <metadata name="schemaVersion" value="2" />
+      <!-- 3, matching the Event Hub ledger below. 2 added cacheHit and costAvoidedUSD and made
+           estimatedCostUSD billed rather than modelled cost; 3 adds requestId and the user columns
+           (userId, userTenantId, userType). A consumer of either stream has to be able to tell the
+           shapes apart from the record alone, so the two must not drift. -->
+      <metadata name="schemaVersion" value="3" />
       <metadata name="correlationId" value='@((string)context.Variables["correlationId"])' />
+      <!-- The API Management request id. correlationId may be supplied by the client and is therefore
+           not unique; this is, and it is the CorrelationId API Management writes to its own gateway
+           and LLM logs. It is the key that joins a streamed request to the token usage recorded in
+           ApiManagementGatewayLlmLog. -->
+      <metadata name="requestId" value="@(context.RequestId.ToString())" />
       <metadata name="environment" value="{{${environment_named_value}}}" />
       <metadata name="product" value='@((string)context.Variables["consumerProduct"])' />
       <metadata name="subscriptionId" value='@((string)context.Variables["consumerSubscription"])' />
@@ -884,6 +1006,12 @@
       <metadata name="consumerId" value='@((string)context.Variables["consumerId"])' />
       <metadata name="consumerName" value='@((string)context.Variables["consumerName"])' />
       <metadata name="consumerType" value='@((string)context.Variables["consumerType"])' />
+      <!-- The individual behind the consumer, from a delegated (On-Behalf-Of) token. userType is
+           "delegated" when a person was identified, "app" for an app-only token, and "none" when
+           user attribution is off; userId is the Entra object id, or "none". -->
+      <metadata name="userId" value='@(context.Variables.GetValueOrDefault&lt;string&gt;("userId", "none"))' />
+      <metadata name="userTenantId" value='@(context.Variables.GetValueOrDefault&lt;string&gt;("userTenantId", "none"))' />
+      <metadata name="userType" value='@(context.Variables.GetValueOrDefault&lt;string&gt;("userType", "none"))' />
       <metadata name="apiId" value="@(context.Api.Id)" />
       <metadata name="operationId" value="@(context.Operation.Id)" />
       <metadata name="modelAlias" value='@((string)context.Variables["requestedModel"])' />
@@ -950,16 +1078,21 @@
         // 2 adds cacheHit and costAvoidedUSD, and changes what estimatedCostUSD means: a semantic
         // cache hit is now zero rather than the full modelled price. That is a correction, but a
         // consumer comparing totals across the upgrade will see spend drop without usage dropping,
-        // so the version has to move with it.
-        ledger["schemaVersion"] = 2;
+        // so the version has to move with it. 3 adds requestId and the user columns for individual
+        // attribution; nothing existing changes meaning.
+        ledger["schemaVersion"] = 3;
         ledger["timestamp"] = DateTime.UtcNow.ToString("o");
         ledger["correlationId"] = (string)context.Variables["correlationId"];
+        ledger["requestId"] = context.RequestId.ToString();
         ledger["environment"] = "{{${environment_named_value}}}";
         ledger["product"] = (string)context.Variables["consumerProduct"];
         ledger["subscriptionId"] = (string)context.Variables["consumerSubscription"];
         ledger["consumerId"] = (string)context.Variables["consumerId"];
         ledger["consumerName"] = (string)context.Variables["consumerName"];
         ledger["consumerType"] = (string)context.Variables["consumerType"];
+        ledger["userId"] = context.Variables.GetValueOrDefault&lt;string&gt;("userId", "none");
+        ledger["userTenantId"] = context.Variables.GetValueOrDefault&lt;string&gt;("userTenantId", "none");
+        ledger["userType"] = context.Variables.GetValueOrDefault&lt;string&gt;("userType", "none");
         ledger["apiId"] = context.Api.Id;
         ledger["operationId"] = context.Operation.Id;
         ledger["modelAlias"] = (string)context.Variables["requestedModel"];
@@ -1045,6 +1178,15 @@
     <set-header name="x-ai-consumer" exists-action="override">
       <value>@(context.Variables.GetValueOrDefault&lt;string&gt;("consumerName", "unknown"))</value>
     </set-header>
+%{ if user_attribution_enabled ~}
+    <!-- The same for the individual: the object id the spend lands against, or "app" when the token
+         was app-only. An OBO integration checks this once to confirm it is sending delegated tokens.
+         Echoed only to the caller that presented the token, so nothing is disclosed it does not
+         already hold. -->
+    <set-header name="x-ai-user" exists-action="override">
+      <value>@(context.Variables.GetValueOrDefault&lt;string&gt;("userType", "none") == "delegated" ? context.Variables.GetValueOrDefault&lt;string&gt;("userId", "none") : context.Variables.GetValueOrDefault&lt;string&gt;("userType", "none"))</value>
+    </set-header>
+%{ endif ~}
 
     <!-- Which backend actually served this request is otherwise invisible. x-ai-deployment and
          x-ai-pool are resolved before routing, so every member of a pool reports the same pair, and
@@ -1076,6 +1218,9 @@
            before consumerId is ever set, and that is exactly the error this trace must record. -->
       <metadata name="consumerId" value='@((string)(context.Variables.ContainsKey("consumerId") ? context.Variables["consumerId"] : "unauthenticated"))' />
       <metadata name="consumerType" value='@((string)(context.Variables.ContainsKey("consumerType") ? context.Variables["consumerType"] : "unauthenticated"))' />
+      <metadata name="userId" value='@((string)(context.Variables.ContainsKey("userId") ? context.Variables["userId"] : "none"))' />
+      <metadata name="userType" value='@((string)(context.Variables.ContainsKey("userType") ? context.Variables["userType"] : "none"))' />
+      <metadata name="requestId" value="@(context.RequestId.ToString())" />
       <metadata name="modelAlias" value='@((string)(context.Variables.ContainsKey("requestedModel") ? context.Variables["requestedModel"] : "unknown"))' />
       <metadata name="pool" value='@((string)(context.Variables.ContainsKey("targetPool") ? context.Variables["targetPool"] : "unknown"))' />
       <metadata name="errorSource" value="@(context.LastError == null ? string.Empty : context.LastError.Source)" />

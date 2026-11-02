@@ -60,6 +60,20 @@ Every one of these has no default, because none of them can be guessed:
 | `products` | map | Commercial tiers, each with its own token ceiling. The product is the governance boundary — put the limits here rather than on the API, so one noisy consumer cannot starve another. |
 | `pricing_map` | any | Rates per alias. Generate it; see above. |
 
+### Optional: per-user attribution
+
+These have defaults and are off until set:
+
+| Name | What it is for |
+|---|---|
+| `caller_tenant_id`, `caller_audiences`, `caller_client_application_ids`, `caller_consumer_names` | Turn on Entra caller authentication in `both` mode. Leave `caller_tenant_id` unset and the gateway stays on subscription keys, with user attribution off. |
+| `user_attribution` | Read the signed-in user from On-Behalf-Of tokens; optional per-user token limits and `require_delegated`. Applies only when `caller_tenant_id` is set. |
+| `log_analytics_workspace_id` | Turns on gateway diagnostics and LLM logs, and lets the ledger backfill streamed requests from `ApiManagementGatewayLlmLog`. **Switches the diagnostic setting to resource-specific tables.** |
+| `users` | Names, departments and cost centres for object ids, for the workbook only. |
+| `daily_user_spend_threshold_usd`, `unattributed_user_threshold_percent` | The per-user spend alert, and the alert for applications sending some requests without a user. |
+
+Consuming applications have to call with On-Behalf-Of tokens for any of this to name a person; see the [integration guide](../../docs/obo-integration.md).
+
 ### Keys have to line up
 
 The `consumers` register in the cost-attribution module is keyed by the identity the gateway stamps onto each ledger record. In `subscription_key` mode that is the key from the `subscriptions` map, which becomes the API Management subscription id verbatim. Get this wrong and every consumer reports as `unassigned` — the workbook will render, and the allocation will be meaningless.

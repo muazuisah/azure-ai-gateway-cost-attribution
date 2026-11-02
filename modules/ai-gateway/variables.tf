@@ -462,6 +462,24 @@ variable "enable_diagnostics" {
   default     = false
 }
 
+variable "enable_llm_logs" {
+  description = <<-EOT
+    Whether to send API Management's built-in LLM logs (the GatewayLlmLogs category, table
+    ApiManagementGatewayLlmLog) to log_analytics_workspace_id. Only takes effect when
+    enable_diagnostics is true.
+
+    These logs record prompt, completion and total tokens for every completion - streamed ones
+    included. The policy cannot read the body of a streamed response without buffering it, so a
+    streamed request reaches the ledger without token counts; the cost-attribution module joins
+    this table back onto the ledger by request id to recover them.
+
+    Only token usage is logged. Prompt and completion text are deliberately not captured: that would
+    put the content of every user's conversation into Log Analytics.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "diagnostic_sampling_percentage" {
   description = <<-EOT
     Percentage of LLM API requests logged to Application Insights.
@@ -774,6 +792,27 @@ variable "caller_authentication" {
     tokens_per_minute
         Gateway-wide token limit used only in entra_id mode, where product-scope limits are
         unavailable. Ignored in the other modes.
+
+    user_attribution
+        Attribute spend to the individual signed-in user as well as the application. Requires mode
+        entra_id or both, and requires consuming applications to call the gateway with a delegated
+        (On-Behalf-Of) token rather than an app-only one. See docs/obo-integration.md.
+
+        In a delegated token the calling application is still in appid/azp, so consumer attribution
+        is unchanged; the user is read from user_claim ("oid" - the immutable object id, never the
+        UPN, which is mutable and personal data). App-only tokens are recorded with userType "app"
+        and no user, because their oid is the calling service principal rather than a person.
+
+        enabled                    - Turn user attribution on. Off by default; the ledger still
+                                     carries the user columns so its schema is stable either way.
+        user_claim / tenant_claim  - Claims identifying the user and their home tenant.
+        require_delegated          - Reject app-only tokens with 403. Use once every consumer has
+                                     adopted OBO, so that no traffic can escape user attribution.
+        tokens_per_minute_per_user - Optional per-user token rate limit, counted per application and
+                                     user pair, so one person cannot exhaust a shared app's capacity.
+        token_quota_per_user       - Optional per-user token quota over token_quota_period.
+        partition_cache_by_user    - Partition the semantic cache by user as well as consumer, so a
+                                     cached completion is never served to a different person.
   EOT
 
   type = object({
@@ -787,6 +826,16 @@ variable "caller_authentication" {
     consumer_names             = optional(map(string), {})
     failed_validation_httpcode = optional(number, 401)
     tokens_per_minute          = optional(number)
+    user_attribution = optional(object({
+      enabled                    = optional(bool, false)
+      user_claim                 = optional(string, "oid")
+      tenant_claim               = optional(string, "tid")
+      require_delegated          = optional(bool, false)
+      tokens_per_minute_per_user = optional(number)
+      token_quota_per_user       = optional(number)
+      token_quota_period         = optional(string, "Daily")
+      partition_cache_by_user    = optional(bool, false)
+    }), {})
     required_claims = optional(list(object({
       name      = string
       match     = optional(string, "any")
@@ -833,6 +882,37 @@ variable "caller_authentication" {
       contains(["all", "any"], claim.match) && length(claim.values) > 0
     ])
     error_message = "Each caller_authentication.required_claims entry needs match of all or any, and at least one value."
+  }
+
+  validation {
+    condition = (
+      !var.caller_authentication.user_attribution.enabled ||
+      var.caller_authentication.mode != "subscription_key"
+    )
+    error_message = "caller_authentication.user_attribution requires mode entra_id or both. A subscription key identifies an application, never a person."
+  }
+
+  validation {
+    condition = (
+      try(trimspace(var.caller_authentication.user_attribution.user_claim), "") != "" &&
+      try(trimspace(var.caller_authentication.user_attribution.tenant_claim), "") != ""
+    )
+    error_message = "caller_authentication.user_attribution user_claim and tenant_claim must not be empty."
+  }
+
+  validation {
+    condition = alltrue([
+      for limit in [
+        var.caller_authentication.user_attribution.tokens_per_minute_per_user,
+        var.caller_authentication.user_attribution.token_quota_per_user,
+      ] : limit == null ? true : limit > 0
+    ])
+    error_message = "caller_authentication.user_attribution per-user limits must be positive when set."
+  }
+
+  validation {
+    condition     = contains(["Hourly", "Daily", "Weekly", "Monthly", "Yearly"], var.caller_authentication.user_attribution.token_quota_period)
+    error_message = "caller_authentication.user_attribution.token_quota_period must be one of Hourly, Daily, Weekly, Monthly, Yearly."
   }
 }
 

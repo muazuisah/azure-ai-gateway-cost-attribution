@@ -54,6 +54,13 @@ The source rows are Application Insights `traces` where `message startswith "llm
 | `cacheHit` | Whether the gateway answered from its semantic cache without calling a model. |
 | `costAvoidedUSD` | What caching saved on this request. Coalesced to `0` for traces emitted before the field existed. |
 | `contextTier` | Which rate card priced the request: `base`, or a tier name such as `long`. Defaulted to `base` for traces emitted before context tiers existed. |
+| `requestId` | APIM's own request id (schema 3). Unlike `correlationId` the caller cannot set it, which makes it the join key to `ApiManagementGatewayLlmLog`. |
+| `userId`, `userTenantId` | The person behind a delegated (On-Behalf-Of) token: the `oid` and `tid` claims by default. `none` for app-only tokens or when user attribution is off; `unresolved` for a delegated token missing the claim. |
+| `userType` | `delegated`, `app` or `none`. Only `delegated` rows name a person. |
+| `userAttributed` | Derived: `userType == "delegated"` with a real `userId`. The filter for every per-user view. |
+| `user` | Derived per-user key: the `userId`, or `(app-only)` / `(unattributed)`, so traffic without a person stays visible under its application instead of disappearing. |
+| `usageSource` | Where the token counts came from: `policy` (the gateway measured the response), `llmlog` (backfilled from API Management's LLM log, typically a streamed request) or `none`. |
+| `backfilled` | Whether this row's tokens and cost came from the LLM log. `usageMeasured` is true for backfilled rows. |
 
 ### `consumer` is the chargeback key
 
@@ -99,6 +106,36 @@ Be careful here: the variable's own description says the key must match the API 
 
 `alert_email` values are merged with `var.alert_emails` into the budget's notification contacts. They do not create per-consumer alert rules; the module ships no per-consumer alerting.
 
+## 3b. Individual attribution
+
+When consuming applications call with On-Behalf-Of tokens (`caller_authentication.user_attribution` on the gateway), every ledger row names the application **and** the person. The design is in [ADR-0009](decisions/0009-individual-attribution-obo.md) and the application-side integration in the [OBO integration guide](obo-integration.md).
+
+**Allocation is two-level.** The invoice is first split across applications exactly as in §1, then each application's portion across its people:
+
+```
+AppShare            = application tokens / all tokens
+ShareOfApplication  = user tokens within the application / application tokens
+Allocated USD       = actual spend × AppShare × ShareOfApplication
+```
+
+Because the second level divides the application's own allocation, application totals are identical with or without user attribution, and the people within an application always add up to it. Requests without a person stay inside the application as `(app-only)` or `(unattributed)` rows, so nothing is redistributed onto users who did not cause it. The `Individual` workbook parameter narrows the per-individual views without changing the application totals the shares are computed against.
+
+**The `users` directory** puts names on object ids:
+
+```hcl
+users = {
+  "11111111-1111-1111-1111-111111111111" = {
+    display_name = "Ada Lovelace"
+    department   = "Claims"
+    cost_centre  = "CC-1234"
+  }
+}
+```
+
+It is joined `kind=leftouter` at report time, exactly like the consumer registry: anyone not listed is still attributed, by object id. It is embedded in the workbook definition, so anyone who can read the workbook can read it — keep it to what finance needs.
+
+**Streamed requests are backfilled.** With `log_analytics_workspace_id` set, the ledger left-joins `ApiManagementGatewayLlmLog` on `requestId = CorrelationId`, fills in `promptTokens`, `completionTokens` and `totalTokens` for rows the policy could not measure, and reprices them from the same `pricing_map` — including context tiers. Rows the policy did measure are never overwritten. Without the workspace id the join is omitted entirely and `usageSource` is `policy` or `none`.
+
 ---
 
 ## 4. The alerts, and what each one means when it fires
@@ -129,9 +166,11 @@ Per product, the percentage of `2xx` responses where `usageMeasured` is false.
 
 **What it means:** successful requests are returning no token counts, so their spend is real and entirely invisible to the ledger.
 
-**By far the most common cause is streaming.** The ledger is built from a parsed JSON response body, and a streamed response is `text/event-stream`, so every streamed request is recorded `usageMeasured = false` by design. This is not a misconfiguration you can tune away — it is the cost of letting tokens reach the client as they are generated, and the reasoning is in [§10 of the policy reference](policies.md). Streamed usage still reaches the token *metrics* through `llm-emit-token-metric`, so you can size the gap: compare metric tokens against ledger tokens for the same period.
+**Historically the most common cause was streaming.** The policy builds its record from a parsed JSON response body, and a streamed response is `text/event-stream`, so the gateway records every streamed request `usageMeasured = false` by design — reading the stream would buffer it, and the reasoning is in [§10 of the policy reference](policies.md). The ledger now closes that gap without touching the hot path: with `enable_llm_logs` on the gateway and `log_analytics_workspace_id` passed to this module, API Management's own `ApiManagementGatewayLlmLog` supplies the token counts, joined on `requestId`, and the row is marked `usageSource = "llmlog"` (see §3b). Backfilled rows count as measured, so with the backfill in place this alert should only fire on genuine gaps.
 
-If the figure is high and your callers do **not** stream, look instead at a stream that terminated early, a response that was not JSON, or a non-2xx body that still looked successful.
+If the backfill is not configured, every streamed request still counts here. Streamed usage reaches the token *metrics* through `llm-emit-token-metric`, so you can size the gap: compare metric tokens against ledger tokens for the same period.
+
+If the figure is high with the backfill configured, check `usageSource` first: `none` on streamed rows means the LLM log has no matching row (see the deployment checks in the [OBO integration guide](obo-integration.md#8-first-deployment-checks)). Otherwise, and if your callers do **not** stream, look instead at a stream that terminated early, a response that was not JSON, or a non-2xx body that still looked successful.
 
 This matters more than it first appears. Ratio allocation redistributes the **entire** invoice across the consumers the ledger observed. A consumer whose requests were not recorded does not get a smaller share — it gets no share, and its spend is silently redistributed over everybody else, who are then over-charged. Unmeasured usage is a correctness failure that propagates into other consumers' bills, not a reporting inconvenience.
 
@@ -142,6 +181,18 @@ Estimated spend per product over a trailing day, evaluated hourly.
 Deliberately an absolute threshold rather than a baseline comparison: Azure log alerts evaluate over a window of at most two days, which is too short to establish a trailing average worth comparing against, and a rule that silently compares against a meaningless baseline is worse than no rule. Trailing averages belong in the workbook, where the query range is unconstrained.
 
 **What it means:** a tier spent more yesterday than you said was normal. It is computed from the **estimate**, so read it as a volume signal, not as a bill.
+
+### `user_spend` — severity 3, optional
+
+Estimated spend per individual (`userId`, summed across every application they use) over a trailing day, evaluated hourly. Created only when `daily_user_spend_threshold_usd` is set.
+
+**What it means:** one person spent more than you said was normal. It is the per-user counterpart of `product_spend` and has the same caveat — it is computed from the estimate, so it is a behaviour signal (a runaway script behind a chat window, a shared account), not a bill. The alert dimension is the object id; look it up in the workbook's *Allocation by individual* section, which applies the `users` directory.
+
+### `unattributed_user_share` — severity 3, default 10% over six hours
+
+Per application, the percentage of `2xx` requests that do not name a person. Only applications that have sent at least one delegated token in the window are evaluated, so applications that have not adopted OBO yet do not fire it.
+
+**What it means:** an application has started sending On-Behalf-Of tokens but some of its code paths still call app-only or without the user claim. The usual culprits are a background job, a retry path that builds its own client, or a token cached across users. Until it is fixed, that share of the application's spend can only be charged to the application. See the [OBO integration guide](obo-integration.md).
 
 ### `telemetry_gap` — severity 2, 5% over six hours, two failing periods of three
 
@@ -397,6 +448,10 @@ Two things to understand before relying on it. It lives on the gateway module, n
 
 **The `Total Tokens` metric does not know about cache hits.** `llm-emit-token-metric` is declared in the inbound section, before the request reaches — or skips — the backend, and it derives its counts from the response. A semantic cache hit replays a response complete with its `usage` block, so those tokens are likely counted in the metric even though no model processed them. The *ledger* is correct, because `cacheHit` is resolved on the outbound path where the answer is known; the metric is a near-real-time signal that cannot see the same thing in time. Practical effect: `token_burn_rate` may count cached traffic toward its ceiling. Treat the metric as "throughput through the gateway" and the ledger as "what was consumed at a model", and reconcile against the ledger whenever the two disagree.
 
+**Backfilled usage is coarser than measured usage.** The LLM log records prompt and completion tokens but no cached-token, cache-write or reasoning split, so a backfilled prompt is priced at the full input rate. When prompt caching is in use that over-estimates the request; ratio allocation corrects the total, but the split between consumers leans slightly towards those who stream. API Management also documents that a broken or terminated stream may log incomplete usage, and the backfill depends on the LLM log's `CorrelationId` equalling the gateway's request id — verify it on first deployment.
+
+**User attribution is only as complete as OBO adoption.** An application that calls app-only is charged in full to `(app-only)`. `require_delegated` closes that gap once every application is migrated; `unattributed_user_share` tells you which ones are not.
+
 **The cache-write premium is assumed, not measured.** `cache_economics` prices cache writes from a single configurable figure across every model, because the ledger records how many tokens were written to cache but not which rate card priced them. It is sufficient for deciding whether a cache is worth keeping; it is not a number to put in an invoice.
 
 ---
@@ -406,5 +461,6 @@ Two things to understand before relying on it. It lives on the gateway module, n
 - [`docs/architecture.md`](architecture.md) — the whole design, including the telemetry sink comparison.
 - [`docs/operations.md`](operations.md) — day-2 runbook, including the alert response procedures.
 - [`docs/policies.md`](policies.md) — what the gateway policy does, section by section.
-- [ADR-0004](decisions/0004-ratio-allocation-chargeback.md), [ADR-0005](decisions/0005-telemetry-sink-selection.md), [ADR-0007](decisions/0007-entra-id-caller-authentication.md), [ADR-0008](decisions/0008-context-length-pricing-tiers.md).
+- [ADR-0004](decisions/0004-ratio-allocation-chargeback.md), [ADR-0005](decisions/0005-telemetry-sink-selection.md), [ADR-0007](decisions/0007-entra-id-caller-authentication.md), [ADR-0008](decisions/0008-context-length-pricing-tiers.md), [ADR-0009](decisions/0009-individual-attribution-obo.md).
+- [`docs/obo-integration.md`](obo-integration.md) — calling the gateway with On-Behalf-Of tokens for per-user attribution.
 - [`examples/03-cost-attribution`](../examples/03-cost-attribution) — Layer 2 onto an API Management instance you already own.

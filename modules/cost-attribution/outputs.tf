@@ -23,6 +23,8 @@ output "alert_rule_ids" {
         unmeasured_usage      = azurerm_monitor_scheduled_query_rules_alert_v2.unmeasured_usage
         product_spend         = azurerm_monitor_scheduled_query_rules_alert_v2.product_spend
         telemetry_gap         = azurerm_monitor_scheduled_query_rules_alert_v2.telemetry_gap
+        user_spend            = azurerm_monitor_scheduled_query_rules_alert_v2.user_spend
+        unattributed_users    = azurerm_monitor_scheduled_query_rules_alert_v2.unattributed_user_share
       } : key => length(rules) > 0 ? rules[0].id : null
     },
     {

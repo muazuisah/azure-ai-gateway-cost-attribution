@@ -185,6 +185,30 @@ At least one of `audiences` or `client_application_ids` is **required** in `entr
 
 > **`entra_id` mode removes a governance tier.** APIM resolves the *product* from the subscription key. With no key there is no product, and product-scope policy **does not execute at all** — so per-product token limits and model entitlement are unavailable. The module applies `tokens_per_minute` gateway-wide instead, and fails the plan if `products` declare controls that would be silently ignored. See [ADR-0007](../../docs/decisions/0007-entra-id-caller-authentication.md).
 
+#### Individual (user) attribution
+
+`caller_authentication.user_attribution` attributes spend to the person behind a request as well as the application, using On-Behalf-Of (OBO) tokens. It requires `mode = "entra_id"` or `"both"`.
+
+```hcl
+caller_authentication = {
+  mode      = "both"
+  tenant_id = "<tenant-guid>"
+  audiences = ["api://ai-gateway"]
+  user_attribution = {
+    enabled                    = true
+    user_claim                 = "oid"    # default; immutable object id, never the UPN
+    tenant_claim               = "tid"    # default
+    require_delegated          = false    # true refuses app-only tokens with 403 delegated_token_required
+    tokens_per_minute_per_user = 20000    # optional, counted per application + user pair
+    token_quota_per_user       = 2000000  # optional
+    token_quota_period         = "Daily"  # Hourly | Daily | Weekly | Monthly | Yearly
+    partition_cache_by_user    = false    # true keys the semantic cache by user as well as consumer
+  }
+}
+```
+
+A token is treated as delegated when it carries `scp` or `idtyp = user`; an app-only token is recorded as `userType = "app"` with no user, so a service principal's object id is never mistaken for a person. The response carries `x-ai-user` (the object id, or `app`) so an integration can confirm it is sending delegated tokens, and `x-ai-user-tokens-remaining` when a per-user limit is set. The ledger moves to `schemaVersion` 3, adding `requestId`, `userId`, `userTenantId` and `userType`. See [ADR-0009](../../docs/decisions/0009-individual-attribution-obo.md) and the [OBO integration guide](../../docs/obo-integration.md).
+
 ### Products and subscriptions
 
 | Name | Type | Default | Description |
@@ -200,6 +224,7 @@ Both are inert in `entra_id` mode, by the mechanism described above.
 |---|---|---|---|
 | `log_analytics_workspace_id` | `string` | `null` | Workspace that receives GatewayLogs and metrics. Required when `enable_diagnostics` is true. |
 | `enable_diagnostics` | `bool` | `false` | Creates the API Management diagnostic setting. Separate from the workspace id on purpose — see below. |
+| `enable_llm_logs` | `bool` | `true` | With `enable_diagnostics`, routes `GatewayLlmLogs` to the workspace and turns on LLM logging for the LLM API (token usage only, never prompt or completion text). This is what lets streamed requests be costed. **Switches the diagnostic setting to resource-specific (`Dedicated`) tables**, so `GatewayLogs` land in `ApiManagementGatewayLogs` instead of `AzureDiagnostics` — update any of your own queries on the legacy table. |
 | `diagnostic_sampling_percentage` | `number` | `100` | **Leave at 100 if you use the chargeback ledger.** Sampling discards requests, and a sampled ledger under-reports silently. |
 | `metric_namespace` | `string` | `"aigateway"` | Namespace for `llm-emit-token-metric` output. |
 | `log_request_and_response_bodies` | `bool` | `false` | Logs prompt and completion **content**. Review retention, access and regional requirements before enabling. |

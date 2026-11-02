@@ -69,6 +69,14 @@ defaults:
         The Azure API Management policy pipeline for an AI Gateway, section by
         section, with the authoring rules that prevent the usual failures.
   - scope:
+      path: obo-integration.md
+    values:
+      title: Per-user attribution with On-Behalf-Of tokens
+      description: >-
+        How a consuming application calls the Azure AI Gateway with an Entra
+        On-Behalf-Of token so token spend is attributed to the signed-in user
+        as well as the application, including streamed requests.
+  - scope:
       path: operations.md
     values:
       title: Operations guide

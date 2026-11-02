@@ -136,6 +136,25 @@ module "ai_gateway" {
   application_insights_id                  = var.application_insights_id
   application_insights_instrumentation_key = var.application_insights_instrumentation_key
 
+  # Entra tokens identify the application; on-behalf-of tokens additionally identify the person behind
+  # it. "both" keeps the subscription key in play because the product it resolves is what carries the
+  # token limits. Without a tenant the gateway stays on keys and user attribution stays off - a key
+  # cannot name a person.
+  caller_authentication = {
+    mode                   = var.caller_tenant_id == null ? "subscription_key" : "both"
+    tenant_id              = var.caller_tenant_id
+    audiences              = var.caller_audiences
+    client_application_ids = var.caller_client_application_ids
+    consumer_names         = var.caller_consumer_names
+    user_attribution       = var.caller_tenant_id == null ? null : var.user_attribution
+  }
+
+  # The built-in LLM logs are the only record of what a streamed response consumed. They need a
+  # workspace, so they are switched on exactly when one is supplied.
+  log_analytics_workspace_id = var.log_analytics_workspace_id
+  enable_diagnostics         = var.log_analytics_workspace_id != null
+  enable_llm_logs            = true
+
   # The setting that decides whether any of this is accurate. The trace policy that writes the
   # chargeback ledger emits only at verbose verbosity and is then sampled like everything else, so a
   # gateway left on a default sampling percentage reports a fraction of its real usage while looking
@@ -190,4 +209,12 @@ module "cost_attribution" {
 
   enable_cache_economics_alert        = var.enable_cache_economics_alert
   cache_write_premium_usd_per_million = var.cache_write_premium_usd_per_million
+
+  # Second level of attribution: the person behind each application's requests. The workspace and rate
+  # card let the reports recover and price streamed usage the policy could not see.
+  users                               = var.users
+  daily_user_spend_threshold_usd      = var.daily_user_spend_threshold_usd
+  unattributed_user_threshold_percent = var.unattributed_user_threshold_percent
+  log_analytics_workspace_id          = var.log_analytics_workspace_id
+  pricing_map                         = var.pricing_map
 }

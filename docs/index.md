@@ -36,6 +36,7 @@ Per-request token accounting, turned into a number finance will accept.
 
 - Token accounting across **input, cached input, cache write, output and reasoning** classes, which are priced differently and are the usual source of quiet errors.
 - Rates generated from the **Azure Retail Prices API**, versioned, rather than transcribed by hand.
+- **Per-user attribution** from On-Behalf-Of tokens: spend is split across applications, then across the signed-in users of each application, with streamed requests costed from API Management's own LLM logs.
 - **Ratio allocation against Azure Cost Management.** Gateway telemetry decides *who*, Azure decides *how much*. The result is immune to enterprise discounts, reservations and provisioned-throughput amortisation — the three things that make naive per-token estimates wrong.
 
 [Read the cost attribution guide →](cost-attribution.md)
@@ -48,9 +49,10 @@ Per-request token accounting, turned into a number finance will accept.
 | --- | --- |
 | [Architecture](architecture.md) | Topology, request flow, network design, and an honest list of limitations |
 | [Cost attribution](cost-attribution.md) | The ledger schema, allocation maths, and the reconciliation loop |
+| [Per-user attribution (OBO)](obo-integration.md) | Calling the gateway with On-Behalf-Of tokens so cost is attributed to users |
 | [Policies](policies.md) | The APIM policy pipeline section by section, and the authoring rules |
 | [Operations](operations.md) | Day-2: regenerating the pricing map, adding models, troubleshooting |
-| [Decision records](decisions/) | Eight ADRs explaining why each trade-off was made |
+| [Decision records](decisions/) | Nine ADRs explaining why each trade-off was made |
 
 ## Source
 
