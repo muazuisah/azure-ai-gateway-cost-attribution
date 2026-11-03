@@ -158,6 +158,12 @@ response. If a new API surface is returning usage under a field name §10 does
 not read, that is a policy change — see
 [policies.md §7](policies.md#7-extending-the-policy-safely).
 
+If the streaming backfill is configured, group the affected rows by
+`usageSource`. Streamed rows still at `none` mean no matching
+`ApiManagementGatewayLlmLog` row: check that the gateway's LLM logs are on and
+that the log's `CorrelationId` matches the ledger's `requestId`
+([OBO guide §8](obo-integration.md#8-first-deployment-checks)).
+
 ### `cache_economics` — severity 3, hourly over a one-day window
 
 **Means:** for one model alias, caching cost more than it saved. The tokens
@@ -196,16 +202,45 @@ is unexplained. If a consumer is genuinely running away, the lever is the
 product token limit — and note that in `entra_id` mode that lever does not
 exist, which is itself worth knowing before you need it.
 
+### `user_spend` — severity 3, hourly over a one-day window, optional
+
+**Means:** one person's estimated spend across every application passed
+`daily_user_spend_threshold_usd`.
+
+**Check:** the workbook's *Allocation by individual* section for that object id
+— which applications, and whether it is a step change.
+
+**Do:** talk to the application owner first; a shared account, a script behind
+a chat interface or a token reused across users all look like one heavy user.
+If it is genuine, `tokens_per_minute_per_user` / `token_quota_per_user` cap a
+person without throttling the rest of the application.
+
+### `unattributed_user_share` — severity 3, hourly over six hours
+
+**Means:** an application that sends On-Behalf-Of tokens sent more than
+`unattributed_user_threshold_percent` (default 10%) of its requests without a
+user.
+
+**Check:** the workbook's *Individual attribution coverage by application*
+table: is it `App-only` (a code path still using client credentials) or
+`Delegated, no user claim` (a token without `oid` — check `user_claim`)?
+
+**Do:** hand it to the application owner with the
+[OBO integration guide](obo-integration.md). Do not turn on
+`require_delegated` until this is quiet for every application, or the missed
+path will start failing with `403 delegated_token_required`.
+
 ### `telemetry_gap` — severity 2
 
-**Means:** the proportion of requests arriving without usable telemetry crossed
-5%, evaluated hourly over a six-hour window and requiring two of three failing
-periods before it fires. The tolerance is deliberate: a single sampled hour
-should not page anyone.
+**Means:** more than 5% of the gateway API's 2xx and 5xx requests have no
+matching `llm.request` or `llm.error` trace, evaluated hourly over a six-hour
+window. 4xx rejections are not counted.
 
 **Check:** Application Insights sampling first — it is the most common cause
 and it is a *configuration* problem, not an outage. Then ingestion delay, then
-whether the policy is still emitting the trace.
+whether the policy is still emitting the trace, then whether
+`gateway_api_name` is set (without it, other APIs on a shared APIM instance
+are counted).
 
 **Do:** if sampling is the cause, reduce or disable it for the gateway's
 Application Insights resource. Note what this means while it is firing: **every

@@ -356,3 +356,124 @@ variable "untiered_long_context_threshold" {
     error_message = "untiered_long_context_threshold must be at least 1."
   }
 }
+
+# ---------------------------------------------------------------------------------------------------
+# Individual (per-user) attribution
+#
+# The gateway records the signed-in user behind an On-Behalf-Of token when the ai-gateway module's
+# caller_authentication.user_attribution is enabled. Everything below is inert until those fields
+# start arriving: older ledger rows report userType "none" and are allocated to the application only.
+# ---------------------------------------------------------------------------------------------------
+
+variable "users" {
+  description = <<-EOT
+    Optional directory of individuals, keyed by the user claim the gateway records (the Entra object
+    id, oid, by default). Used only to put names, departments and cost centres on the per-user views.
+
+      users = {
+        "11111111-1111-1111-1111-111111111111" = {
+          display_name = "Ada Lovelace"
+          department   = "Claims"
+          cost_centre  = "CC-1234"
+        }
+      }
+
+    Anyone not listed is still attributed, by object id. Do not treat this as an access list - the
+    gateway does not read it. Keep it to what finance needs; it ends up in the workbook definition,
+    so anyone who can read the workbook can read it.
+  EOT
+  type = map(object({
+    display_name = optional(string)
+    department   = optional(string)
+    cost_centre  = optional(string)
+  }))
+  default = {}
+}
+
+variable "daily_user_spend_threshold_usd" {
+  description = <<-EOT
+    Raise an alert when any single individual's estimated spend over the trailing day exceeds this
+    amount. Evaluated per user across every application they reach the gateway through, which is the
+    point: one person driving five copilots shows up once, not as five small numbers. Null disables
+    the alert.
+  EOT
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.daily_user_spend_threshold_usd == null || try(var.daily_user_spend_threshold_usd > 0, false)
+    error_message = "daily_user_spend_threshold_usd must be greater than zero, or null."
+  }
+}
+
+variable "unattributed_user_threshold_percent" {
+  description = <<-EOT
+    Percentage of an application's successful requests that arrived without an identifiable user,
+    above which an alert is raised. Only applications that have sent at least one delegated
+    (On-Behalf-Of) request in the window are evaluated, so a purely app-only service never fires it.
+
+    The usual cause is a consuming application that has adopted OBO on some code paths but still
+    calls the gateway with its own app-only token on others, so part of its spend cannot be split
+    between people. Null disables the alert.
+  EOT
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.unattributed_user_threshold_percent == null || try(var.unattributed_user_threshold_percent > 0 && var.unattributed_user_threshold_percent <= 100, false)
+    error_message = "unattributed_user_threshold_percent must be between 0 and 100, or null."
+  }
+}
+
+# ---------------------------------------------------------------------------------------------------
+# Streaming usage
+#
+# The policy cannot read a streamed response body without buffering the stream, so a streamed
+# request reaches the ledger with no token counts. API Management's own LLM logs do carry the usage
+# for streamed completions, keyed by the same request id the ledger records, so the reporting joins
+# the two rather than slowing every stream down.
+# ---------------------------------------------------------------------------------------------------
+
+variable "gateway_api_name" {
+  description = <<-EOT
+    Name of the gateway's LLM API in API Management (the ai-gateway module's api_name output). The
+    telemetry_gap alert counts only that API's requests, so other APIs sharing the APIM instance and its
+    Application Insights resource do not read as missing ledger rows. Leave null to count every request.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "log_analytics_workspace_id" {
+  description = <<-EOT
+    Resource ID of the Log Analytics workspace that receives the gateway's ApiManagementGatewayLlmLog
+    table (the ai-gateway module's enable_diagnostics plus enable_llm_logs). When set, the ledger
+    projection used by every alert and the workbook backfills token counts for requests the policy
+    could not measure - streamed responses - from that table, and records where each row's usage came
+    from in a usageSource column.
+
+    Leave null to keep the ledger as the policy wrote it. Streamed requests then remain "unmeasured".
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.log_analytics_workspace_id == null || can(regex("(?i)^/subscriptions/[^/]+/resourcegroups/[^/]+/providers/microsoft\\.operationalinsights/workspaces/[^/]+$", var.log_analytics_workspace_id))
+    error_message = "log_analytics_workspace_id must be a Log Analytics workspace resource ID."
+  }
+}
+
+variable "pricing_map" {
+  description = <<-EOT
+    The same pricing_map passed to the ai-gateway module. Used only to price requests whose usage was
+    backfilled from the LLM logs, since the policy could not price what it could not measure. Leave
+    empty and backfilled requests still carry tokens - which is what the allocation key uses - but
+    report no estimated cost.
+
+    The LLM log does not split cached from uncached prompt tokens, so backfilled prompts are priced
+    at the full input rate. That overstates rather than understates, which is the safer direction
+    for a chargeback estimate.
+  EOT
+  type        = any
+  default     = {}
+}

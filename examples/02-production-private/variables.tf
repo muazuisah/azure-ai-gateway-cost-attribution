@@ -323,3 +323,34 @@ variable "caller_consumer_names" {
   type        = map(string)
   default     = {}
 }
+
+variable "user_attribution" {
+  description = "Per-user attribution from on-behalf-of tokens. Requires caller_tenant_id. See docs/obo-integration.md."
+  type = object({
+    enabled                    = optional(bool, false)
+    user_claim                 = optional(string, "oid")
+    tenant_claim               = optional(string, "tid")
+    require_delegated          = optional(bool, false)
+    tokens_per_minute_per_user = optional(number)
+    token_quota_per_user       = optional(number)
+    token_quota_period         = optional(string, "Daily")
+    partition_cache_by_user    = optional(bool, false)
+  })
+  default = {}
+}
+
+variable "users" {
+  description = "Optional directory of individuals keyed by Entra object id, used only to label the per-user views."
+  type = map(object({
+    display_name = optional(string)
+    department   = optional(string)
+    cost_centre  = optional(string)
+  }))
+  default = {}
+}
+
+variable "daily_user_spend_threshold_usd" {
+  description = "Estimated daily spend by one individual that raises an alert. Null disables it."
+  type        = number
+  default     = null
+}

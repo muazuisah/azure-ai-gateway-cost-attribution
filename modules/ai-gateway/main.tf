@@ -174,6 +174,11 @@ locals {
     var.caller_authentication.mode == "entra_id" ? var.caller_authentication.tokens_per_minute : null
   )
 
+  # Individual (user) attribution rides on the Entra token, so it can only be on when Entra is. The
+  # variable validation already rejects the combination; the && keeps the policy safe regardless.
+  user_attribution         = var.caller_authentication.user_attribution
+  user_attribution_enabled = local.entra_enabled && local.user_attribution.enabled
+
   # Products that gate models or tokens are inert in entra_id mode. Surfaced as a guard rather than
   # silently ignored, because a quota you believe is enforced and is not is worse than no quota.
   inert_product_controls = var.caller_authentication.mode != "entra_id" ? [] : [
@@ -616,6 +621,15 @@ resource "azurerm_api_management_api_policy" "llm" {
     entra_claim_order            = local.entra_claim_order
     entra_consumer_names         = var.caller_authentication.consumer_names
     entra_gateway_token_limit    = local.entra_gateway_token_limit
+
+    user_attribution_enabled = local.user_attribution_enabled
+    user_claim               = local.user_attribution.user_claim
+    user_tenant_claim        = local.user_attribution.tenant_claim
+    user_require_delegated   = local.user_attribution_enabled && local.user_attribution.require_delegated
+    user_tokens_per_minute   = local.user_attribution_enabled ? local.user_attribution.tokens_per_minute_per_user : null
+    user_token_quota         = local.user_attribution_enabled ? local.user_attribution.token_quota_per_user : null
+    user_token_quota_period  = local.user_attribution.token_quota_period
+    user_partition_cache     = local.user_attribution_enabled && local.user_attribution.partition_cache_by_user
   })
 
   depends_on = [
@@ -789,8 +803,20 @@ resource "azurerm_monitor_diagnostic_setting" "apim" {
   target_resource_id         = local.apim_id
   log_analytics_workspace_id = var.log_analytics_workspace_id
 
+  # GatewayLlmLogs is only written to its resource-specific table (ApiManagementGatewayLlmLog), so
+  # resource-specific mode is selected whenever it is enabled. GatewayLogs then land in
+  # ApiManagementGatewayLogs rather than the legacy AzureDiagnostics table.
+  log_analytics_destination_type = var.enable_llm_logs ? "Dedicated" : null
+
   enabled_log {
     category = "GatewayLogs"
+  }
+
+  dynamic "enabled_log" {
+    for_each = var.enable_llm_logs ? [1] : []
+    content {
+      category = "GatewayLlmLogs"
+    }
   }
 
   enabled_metric {
@@ -803,6 +829,45 @@ resource "azurerm_monitor_diagnostic_setting" "apim" {
       error_message = "enable_diagnostics is true but log_analytics_workspace_id is null. Set the workspace id, or set enable_diagnostics = false."
     }
   }
+}
+
+# ---------------------------------------------------------------------------------------------------
+# LLM logs for the LLM API
+#
+# The service-level diagnostic setting above only routes the GatewayLlmLogs category; whether an API
+# produces those records at all is an API-level switch on the built-in "azuremonitor" diagnostic. The
+# AzureRM provider does not expose largeLanguageModel, hence azapi (as for backend pools, ADR 0003).
+#
+# This is what makes streamed requests chargeable. The policy deliberately never reads a streamed
+# response body (doing so would buffer the stream), so the ledger records streamed requests with no
+# token counts. API Management meters the stream itself and writes the usage here, keyed by the same
+# request id the ledger records, and the cost-attribution module joins the two.
+#
+# requests/responses are omitted so prompt and completion text are not logged - only token usage.
+# ---------------------------------------------------------------------------------------------------
+resource "azapi_resource" "llm_api_azuremonitor_diagnostic" {
+  count = var.enable_diagnostics && var.enable_llm_logs ? 1 : 0
+
+  type      = "Microsoft.ApiManagement/service/apis/diagnostics@2024-06-01-preview"
+  name      = "azuremonitor"
+  parent_id = "${local.apim_id}/apis/${azurerm_api_management_api.llm.name}"
+
+  body = {
+    properties = {
+      loggerId    = "${local.apim_id}/loggers/azuremonitor"
+      alwaysLog   = "allErrors"
+      logClientIp = false
+      sampling = {
+        samplingType = "fixed"
+        percentage   = 100
+      }
+      largeLanguageModel = {
+        logs = "enabled"
+      }
+    }
+  }
+
+  depends_on = [azurerm_monitor_diagnostic_setting.apim]
 }
 # ---------------------------------------------------------------------------------------------------
 # Audit-grade export (optional)

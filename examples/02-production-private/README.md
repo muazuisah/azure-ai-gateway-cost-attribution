@@ -44,6 +44,8 @@ Agents are capped hardest on purpose. An agent loop is the most effective way to
 
 `both` is deliberate rather than a halfway house. The subscription key is what lets APIM resolve the **product**, and the product carries the token limits and the `allowed_models` entitlement above; drop the key and all of that silently disarms. The Entra token is what the chargeback ledger attributes spend to, because an app registration cannot be copied into a second service the way a key can. See [ADR-0007](../../docs/decisions/0007-entra-id-caller-authentication.md).
 
+With `caller_tenant_id` set, `user_attribution` additionally reads the signed-in user from On-Behalf-Of tokens, so spend is attributed per application **and** per person. Streamed requests are costed from API Management's LLM logs, which this example routes to its Log Analytics workspace; `users` and `daily_user_spend_threshold_usd` add names and a per-user spend alert. See the [OBO integration guide](../../docs/obo-integration.md) and [ADR-0009](../../docs/decisions/0009-individual-attribution-obo.md).
+
 ## Prerequisites
 
 - Terraform **>= 1.9.0**, `hashicorp/azurerm` **>= 5.0.0, < 6.0.0**, `Azure/azapi` **>= 2.0.0, < 3.0.0**.

@@ -2,7 +2,7 @@
 description: >-
   How to run Azure API Management as a centralised AI Gateway in front of
   Microsoft Foundry and Azure OpenAI deployments, and how to attribute token
-  cost to the applications that spent it. Reference architecture, decision
+  cost to the applications and the individual users that spent it. Reference architecture, decision
   records and production-grade Terraform.
 ---
 
@@ -12,7 +12,7 @@ Two problems show up on nearly every enterprise Azure OpenAI engagement, and the
 
 **The first is control.** Model deployments multiply across regions and subscriptions, each with its own endpoint and key. A model name ends up hard-coded into dozens of services, so upgrading from one model version to the next becomes a coordinated release across every team that calls it.
 
-**The second is cost.** The Azure bill shows what Foundry cost. It does not show which application spent it, because every request arrives at the model with the same managed identity. Finance asks "what did each team spend on AI last month?" and there is no defensible answer.
+**The second is cost.** The Azure bill shows what Foundry cost. It does not show which application spent it, because every request arrives at the model with the same managed identity. Finance asks "what did each team spend on AI last month?" — and, increasingly, "which people drove it?" — and there is no defensible answer.
 
 This project is the reference architecture and Terraform for solving both, as two layers in one codebase.
 
@@ -36,6 +36,7 @@ Per-request token accounting, turned into a number finance will accept.
 
 - Token accounting across **input, cached input, cache write, output and reasoning** classes, which are priced differently and are the usual source of quiet errors.
 - Rates generated from the **Azure Retail Prices API**, versioned, rather than transcribed by hand.
+- **Per-user attribution** from On-Behalf-Of tokens: spend is split across applications, then across the signed-in users of each application, with streamed requests costed from API Management's own LLM logs.
 - **Ratio allocation against Azure Cost Management.** Gateway telemetry decides *who*, Azure decides *how much*. The result is immune to enterprise discounts, reservations and provisioned-throughput amortisation — the three things that make naive per-token estimates wrong.
 
 [Read the cost attribution guide →](cost-attribution.md)
@@ -48,9 +49,11 @@ Per-request token accounting, turned into a number finance will accept.
 | --- | --- |
 | [Architecture](architecture.md) | Topology, request flow, network design, and an honest list of limitations |
 | [Cost attribution](cost-attribution.md) | The ledger schema, allocation maths, and the reconciliation loop |
+| [Per-user attribution (OBO)](obo-integration.md) | Calling the gateway with On-Behalf-Of tokens so cost is attributed to users |
 | [Policies](policies.md) | The APIM policy pipeline section by section, and the authoring rules |
 | [Operations](operations.md) | Day-2: regenerating the pricing map, adding models, troubleshooting |
-| [Decision records](decisions/) | Eight ADRs explaining why each trade-off was made |
+| [Validation](validation.md) | Live-deployment evidence — load balancing, cost and per-user attribution — and the defects only a live deployment found |
+| [Decision records](decisions/) | Nine ADRs explaining why each trade-off was made |
 
 ## Source
 

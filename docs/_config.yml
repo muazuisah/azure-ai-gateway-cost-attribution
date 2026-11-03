@@ -12,8 +12,8 @@ tagline: Microsoft Foundry on Azure API Management
 description: >-
   Reference architecture and production-grade Terraform for running Azure API
   Management as a centralised AI Gateway in front of Microsoft Foundry and
-  Azure OpenAI model deployments, with per-application cost attribution and
-  chargeback reconciled against Azure Cost Management.
+  Azure OpenAI model deployments, with per-application and per-user cost
+  attribution and chargeback reconciled against Azure Cost Management.
 
 url: https://muazuisah.github.io
 baseurl: /azure-ai-gateway-cost-attribution
@@ -58,9 +58,9 @@ defaults:
     values:
       title: Cost attribution and chargeback
       description: >-
-        How to attribute Azure OpenAI token spend to the application that
-        caused it: the ledger schema, the allocation maths, and reconciliation
-        against Azure Cost Management.
+        How to attribute Azure OpenAI token spend to the application and the
+        user that caused it: the ledger schema, the two-level allocation maths,
+        and reconciliation against Azure Cost Management.
   - scope:
       path: policies.md
     values:
@@ -69,12 +69,28 @@ defaults:
         The Azure API Management policy pipeline for an AI Gateway, section by
         section, with the authoring rules that prevent the usual failures.
   - scope:
+      path: obo-integration.md
+    values:
+      title: Per-user attribution with On-Behalf-Of tokens
+      description: >-
+        How a consuming application calls the Azure AI Gateway with an Entra
+        On-Behalf-Of token so token spend is attributed to the signed-in user
+        as well as the application, including streamed requests.
+  - scope:
       path: operations.md
     values:
       title: Operations guide
       description: >-
         Day-2 operations: regenerating the pricing map, adding models and
         consumers, reading the chargeback workbook, and troubleshooting.
+  - scope:
+      path: validation.md
+    values:
+      title: Validation
+      description: >-
+        Evidence from live deployments: load balancing, failover, cache
+        economics, per-application and per-user cost attribution, and the
+        defects only a real subscription surfaced.
 
 exclude:
   - Gemfile

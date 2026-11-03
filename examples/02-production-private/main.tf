@@ -279,6 +279,8 @@ module "ai_gateway" {
     audiences              = var.caller_audiences
     client_application_ids = var.caller_client_application_ids
     consumer_names         = var.caller_consumer_names
+    # The person behind each request, from on-behalf-of tokens. A subscription key cannot name one.
+    user_attribution = var.caller_tenant_id == null ? null : var.user_attribution
   }
 
   # Content safety runs in line, against the multi-service Foundry endpoint that already exists. Prompt
@@ -327,6 +329,7 @@ module "cost_attribution" {
 
   application_insights_id = module.observability.application_insights_id
   api_management_id       = module.ai_gateway.api_management_id
+  gateway_api_name        = module.ai_gateway.api_name
   metric_namespace        = module.ai_gateway.metric_namespace
 
   consumers = var.consumers
@@ -341,4 +344,11 @@ module "cost_attribution" {
 
   token_rate_alert_threshold = var.token_rate_alert_threshold
   daily_spend_threshold_usd  = var.daily_spend_threshold_usd
+
+  # Per-user reporting, with streamed usage recovered from the gateway's LLM logs and priced with the
+  # same rate card the policy uses.
+  users                          = var.users
+  daily_user_spend_threshold_usd = var.daily_user_spend_threshold_usd
+  log_analytics_workspace_id     = module.observability.log_analytics_workspace_id
+  pricing_map                    = var.pricing_map
 }

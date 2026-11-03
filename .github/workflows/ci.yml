@@ -71,7 +71,10 @@ jobs:
       - name: terraform test
         run: |
           set -euo pipefail
-          for dir in modules/networking
+          for dir in \
+            modules/ai-gateway \
+            modules/cost-attribution \
+            modules/networking
           do
             echo "::group::$dir"
             terraform -chdir="$dir" init -backend=false -no-color

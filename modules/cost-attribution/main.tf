@@ -64,11 +64,20 @@ locals {
   # Every query below starts from this. Pinning it in one place means the schema is defined once and
   # the alerts cannot drift away from the workbook.
   # -------------------------------------------------------------------------------------------------
-  ledger_query = <<-KQL
+  ledger_policy_query = <<-KQL
     traces
     | where message startswith "llm.request"
     | extend
         correlationId  = tostring(customDimensions["correlationId"]),
+        // The API Management request id (schema 3+). This is the CorrelationId that the gateway's own
+        // ApiManagementGatewayLlmLog rows carry, so it is the join key for streamed usage.
+        requestId      = tostring(customDimensions["requestId"]),
+        // The individual behind the call (schema 3+), resolved from an On-Behalf-Of token. userType
+        // is "delegated" when a person signed in, "app" for an app-only token and "none" when user
+        // attribution is off.
+        userIdRaw      = tostring(customDimensions["userId"]),
+        userTenantId   = tostring(customDimensions["userTenantId"]),
+        userTypeRaw    = tostring(customDimensions["userType"]),
         environment    = tostring(customDimensions["environment"]),
         product        = tostring(customDimensions["product"]),
         subscriptionId = tostring(customDimensions["subscriptionId"]),
@@ -117,7 +126,116 @@ locals {
     // context tiers existed.
     | extend contextTier = iff(isempty(contextTierRaw), "base", contextTierRaw)
     | extend cacheHit = cacheHitRaw =~ "True"
+    // Rows written before schema 3, or with user attribution off, have no user at all. They are
+    // still charged to their application; they simply cannot be split further.
+    | extend
+        userType = iff(isempty(userTypeRaw), "none", userTypeRaw),
+        userId   = iff(isempty(userIdRaw), "none", userIdRaw)
+    | extend userAttributed = userType == "delegated" and userId !in ("none", "unresolved")
+    // The second-level allocation key. Spend an application incurred without a person behind it
+    // stays with the application under an explicit bucket rather than vanishing from the user view.
+    | extend user = case(
+        userAttributed, userId,
+        userType == "app", "(app-only)",
+        "(unattributed)")
   KQL
+
+  # -------------------------------------------------------------------------------------------------
+  # Streaming backfill.
+  #
+  # A streamed response is never read by the policy - reading it would buffer the stream - so it is
+  # recorded with usageMeasured false and no tokens. API Management's LLM logs read the final SSE
+  # chunk natively and key it by the same request id. Joining the two fills those rows in without
+  # touching the hot path.
+  #
+  # The union with an empty datatable keeps the query valid before the table exists, which it does not
+  # until the first LLM request has been logged; without it, alert creation fails on a fresh
+  # deployment. The LLM log can split one request across several rows when a message is large, and
+  # each row repeats the usage, so the counts are taken with max() rather than sum().
+  # -------------------------------------------------------------------------------------------------
+  streaming_backfill_enabled = var.log_analytics_workspace_id != null
+
+  # The rate card is rendered into KQL case() branches rather than shipped as a dynamic bag. Choosing a
+  # context tier per row from a bag needs mv-apply, and mv-apply silently drops any row whose
+  # subquery returns nothing - which is every unpriced or flat-rate row.
+  #
+  # Branch order matters: for each model the highest threshold comes first, then the base rate.
+  pricing_branches = flatten([
+    for alias, entry in var.pricing_map : concat(
+      [
+        for key in reverse(sort([
+          for tier in try(entry.contextTiers, []) : format("%015d", tonumber(tier.minPromptTokens))
+          ])) : [
+          for tier in try(entry.contextTiers, []) : {
+            predicate = "modelAlias == ${jsonencode(alias)} and promptTokens >= ${tonumber(tier.minPromptTokens)}"
+            unit      = try(tonumber(entry.unit), 1000000)
+            # Mirrors the policy: a tier inherits only its unit; any rate it omits counts as zero.
+            input  = try(tonumber(tier.input), 0)
+            output = try(tonumber(tier.output), 0)
+          } if format("%015d", tonumber(tier.minPromptTokens)) == key
+        ][0]
+      ],
+      [{
+        predicate = "modelAlias == ${jsonencode(alias)}"
+        unit      = try(tonumber(entry.unit), 1000000)
+        input     = try(tonumber(entry.input), 0)
+        output    = try(tonumber(entry.output), 0)
+      }]
+    )
+  ])
+
+  # Null when the model is not in the rate card, so an unpriced backfilled request keeps the policy's
+  # own figure rather than being reported as free.
+  backfill_cost_expression = length(local.pricing_branches) == 0 ? "estimatedCostUSD" : format(
+    "iff(not(backfilled), estimatedCostUSD, coalesce(round(todouble(promptTokens) * case(%s, real(null)) + todouble(completionTokens) * case(%s, real(null)), 8), estimatedCostUSD))",
+    join(", ", [for b in local.pricing_branches : "${b.predicate}, todouble(${b.input}) / todouble(${b.unit})"]),
+    join(", ", [for b in local.pricing_branches : "${b.predicate}, todouble(${b.output}) / todouble(${b.unit})"]),
+  )
+
+  ledger_streaming_join = <<-KQL
+    | join kind=leftouter (
+        union isfuzzy=true
+          (datatable(CorrelationId: string, PromptTokens: long, CompletionTokens: long, TotalTokens: long)[]),
+          (workspace("${coalesce(var.log_analytics_workspace_id, "none")}").ApiManagementGatewayLlmLog
+            | project CorrelationId, PromptTokens = tolong(PromptTokens), CompletionTokens = tolong(CompletionTokens), TotalTokens = tolong(TotalTokens))
+        | where isnotempty(CorrelationId)
+        | summarize
+            llmPromptTokens = max(PromptTokens),
+            llmCompletionTokens = max(CompletionTokens),
+            llmTotalTokens = max(TotalTokens)
+            by CorrelationId
+      ) on $left.requestId == $right.CorrelationId
+    | extend backfilled = not(usageMeasured) and isnotempty(requestId) and coalesce(llmTotalTokens, 0) > 0
+    | extend
+        usageSource = case(usageMeasured, "policy", backfilled, "llmlog", "none"),
+        usageMeasured = usageMeasured or backfilled,
+        promptTokens = iff(backfilled, toint(llmPromptTokens), promptTokens),
+        billablePromptTokens = iff(backfilled, toint(llmPromptTokens), billablePromptTokens),
+        completionTokens = iff(backfilled, toint(llmCompletionTokens), completionTokens),
+        totalTokens = iff(backfilled, toint(llmTotalTokens), totalTokens)
+    // Price what was backfilled. A context tier reprices the whole request once total prompt tokens
+    // cross its threshold, exactly as the policy does.
+    | extend estimatedCostUSD = ${local.backfill_cost_expression}
+    | project-away CorrelationId, llmPromptTokens, llmCompletionTokens, llmTotalTokens
+  KQL
+
+  ledger_query = local.streaming_backfill_enabled ? join("\n", [
+    trimspace(local.ledger_policy_query),
+    trimspace(local.ledger_streaming_join),
+    ]) : join("\n", [
+    trimspace(local.ledger_policy_query),
+    "| extend usageSource = iff(usageMeasured, \"policy\", \"none\")",
+  ])
+
+  # The per-user directory, shaped for embedding in the workbook the same way the consumer register is.
+  user_directory = [
+    for id, user in var.users : {
+      user        = id
+      displayName = coalesce(user.display_name, id)
+      department  = user.department == null ? "" : user.department
+      costCentre  = user.cost_centre == null ? "" : user.cost_centre
+    }
+  ]
 }
 
 # ---------------------------------------------------------------------------------------------------
@@ -361,12 +479,128 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "product_spend" {
 }
 
 # ---------------------------------------------------------------------------------------------------
+# Alert 3b - individual spend
+#
+# Summed per person across every application, because that is the number nobody else can see: each
+# application owner sees a modest share of one user, and only the gateway sees all of them together.
+# ---------------------------------------------------------------------------------------------------
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "user_spend" {
+  count = local.alerts_enabled && var.daily_user_spend_threshold_usd != null ? 1 : 0
+
+  name                = "${var.name_prefix}-ai-user-spend"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  tags                = local.tags
+
+  description = "An individual's estimated AI spend over the trailing day, across every application they use through the gateway, has exceeded its threshold."
+  severity    = 3
+  enabled     = true
+
+  scopes                  = [var.application_insights_id]
+  evaluation_frequency    = "PT1H"
+  window_duration         = "P1D"
+  auto_mitigation_enabled = true
+
+  criteria {
+    query = <<-KQL
+      ${local.ledger_query}
+      | where userAttributed and estimatedCostUSD > 0
+      | summarize SpendUSD = round(sum(estimatedCostUSD), 4) by userId
+    KQL
+
+    time_aggregation_method = "Total"
+    metric_measure_column   = "SpendUSD"
+    threshold               = coalesce(var.daily_user_spend_threshold_usd, 1)
+    operator                = "GreaterThan"
+
+    dimension {
+      name     = "userId"
+      operator = "Include"
+      values   = ["*"]
+    }
+
+    failing_periods {
+      minimum_failing_periods_to_trigger_alert = 1
+      number_of_evaluation_periods             = 1
+    }
+  }
+
+  action {
+    action_groups = [local.action_group_id]
+  }
+}
+
+# ---------------------------------------------------------------------------------------------------
+# Alert 3c - unattributed share
+#
+# Per-user chargeback is only as good as the share of traffic that carries a user. An application that
+# has adopted On-Behalf-Of on its main path but still calls with its own token from a background job
+# produces spend that can be charged to the application and to nobody inside it. Applications that
+# have never sent a delegated token are skipped, since all of their traffic is app-only by design.
+# ---------------------------------------------------------------------------------------------------
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "unattributed_user_share" {
+  count = local.alerts_enabled && var.unattributed_user_threshold_percent != null ? 1 : 0
+
+  name                = "${var.name_prefix}-ai-unattributed-users"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  tags                = local.tags
+
+  description = "An application that sends On-Behalf-Of tokens is also sending requests with no identifiable user, so part of its spend cannot be split between people."
+  severity    = 3
+  enabled     = true
+
+  scopes                  = [var.application_insights_id]
+  evaluation_frequency    = "PT1H"
+  window_duration         = "PT6H"
+  auto_mitigation_enabled = true
+
+  criteria {
+    query = <<-KQL
+      ${local.ledger_query}
+      | where statusCode between (200 .. 299)
+      | summarize Total = count(), Delegated = countif(userType == "delegated"), Attributed = countif(userAttributed) by consumerLabel
+      | where Delegated > 0
+      | extend UnattributedPercent = round(100.0 * (Total - Attributed) / Total, 2)
+      | project consumerLabel, UnattributedPercent
+    KQL
+
+    time_aggregation_method = "Maximum"
+    metric_measure_column   = "UnattributedPercent"
+    threshold               = coalesce(var.unattributed_user_threshold_percent, 100)
+    operator                = "GreaterThan"
+
+    dimension {
+      name     = "consumerLabel"
+      operator = "Include"
+      values   = ["*"]
+    }
+
+    failing_periods {
+      minimum_failing_periods_to_trigger_alert = 1
+      number_of_evaluation_periods             = 1
+    }
+  }
+
+  action {
+    action_groups = [local.action_group_id]
+  }
+}
+
+# ---------------------------------------------------------------------------------------------------
 # Alert 4 - telemetry gap
 #
 # Compares the number of ledger records against the number of requests the gateway API actually served.
 # If the ledger is short, the chargeback numbers are short too, and the usual cause is the API
 # diagnostic sampling percentage having been moved off 100 by someone trying to save money on
 # Application Insights ingestion.
+#
+# Each request is matched to its own llm.request or llm.error trace by operation_Id, rather than two
+# totals being compared. A shared APIM instance logs every API, and every unmatched-path probe, into the
+# same Application Insights resource, and those would otherwise count as missing ledger rows. Only
+# 2xx and 5xx responses are counted: a 4xx is a rejection that consumed no model, and several are
+# answered by the policy itself without a trace (unknown model, oversized prompt, per-user limit), as is
+# GET /models.
 # ---------------------------------------------------------------------------------------------------
 resource "azurerm_monitor_scheduled_query_rules_alert_v2" "telemetry_gap" {
   count = local.alerts_enabled ? 1 : 0
@@ -387,15 +621,17 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "telemetry_gap" {
 
   criteria {
     query = <<-KQL
-      let ledgerCount = toscalar(
-          traces
-          | where message startswith "llm.request"
-          | count
-      );
+      let gatewayApi = ${jsonencode(var.gateway_api_name == null ? "" : var.gateway_api_name)};
+      let traced = traces
+          | where message startswith "llm.request" or message startswith "llm.error"
+          | distinct operation_Id
+          | extend hasTrace = true;
       requests
-      | where success == true or toint(resultCode) between (200 .. 599)
-      | summarize GatewayRequests = count()
-      | extend LedgerRecords = coalesce(ledgerCount, 0)
+      | where isempty(gatewayApi) or tostring(customDimensions["API Name"]) == gatewayApi
+      | where tostring(customDimensions["Operation Name"]) != "list-models"
+      | where toint(resultCode) between (200 .. 299) or toint(resultCode) >= 500
+      | join kind=leftouter traced on operation_Id
+      | summarize GatewayRequests = count(), LedgerRecords = countif(hasTrace == true)
       | extend MissingPercent = iff(GatewayRequests == 0, 0.0, round(100.0 * (GatewayRequests - LedgerRecords) / GatewayRequests, 2))
       | project MissingPercent
     KQL
@@ -627,5 +863,12 @@ resource "azurerm_application_insights_workbook" "chargeback" {
     # double quotes therefore have to survive one round of JSON decoding, so they are escaped here and
     # the KQL literal is single-quoted in the template.
     consumer_registry = replace(jsonencode(local.consumer_registry), "\"", "\\\"")
+    # Base64 rather than escaped JSON: display names routinely contain apostrophes, which would end
+    # the single-quoted KQL literal the registry above relies on.
+    user_directory = base64encode(jsonencode(local.user_directory))
+    # The full ledger projection, streaming backfill included, so the per-user views price streamed
+    # requests the same way the alerts do. jsonencode produces a quoted JSON string; the surrounding
+    # quotes are stripped because the template places it inside an existing string.
+    ledger_query = trimsuffix(trimprefix(jsonencode(local.ledger_query), "\""), "\"")
   })
 }

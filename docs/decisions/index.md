@@ -1,9 +1,10 @@
 ---
 title: Architecture decision records
 description: >-
-  Why this Azure AI Gateway is built the way it is: eight architecture decision
+  Why this Azure AI Gateway is built the way it is: nine architecture decision
   records covering backend pools, managed identity, cost allocation, telemetry
-  sinks, alias routing, Entra ID authentication and context-length pricing.
+  sinks, alias routing, Entra ID authentication, context-length pricing and
+  per-user attribution.
 ---
 
 # Architecture decision records
@@ -20,5 +21,6 @@ Each record states the decision, the alternatives that were rejected, and the co
 | [0006](0006-alias-routing-vs-unified-model-api.md) | Alias routing on GA primitives, not the preview unified model API |
 | [0007](0007-entra-id-caller-authentication.md) | Microsoft Entra ID for caller authentication and cost attribution |
 | [0008](0008-context-length-pricing-tiers.md) | Context-length pricing tiers |
+| [0009](0009-individual-attribution-obo.md) | Individual cost attribution from On-Behalf-Of tokens |
 
 [← Back to documentation home](../)

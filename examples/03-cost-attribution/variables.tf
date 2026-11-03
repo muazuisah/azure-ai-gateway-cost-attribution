@@ -273,3 +273,88 @@ variable "semantic_cache_settings" {
     error_message = "score_threshold must be between 0 and 1."
   }
 }
+
+# ---------------------------------------------------------------------------------------------------
+# Individual attribution
+# ---------------------------------------------------------------------------------------------------
+variable "caller_tenant_id" {
+  description = "Microsoft Entra tenant whose tokens the gateway accepts. Null keeps the gateway on subscription keys, which identify an application but never a person - so individual attribution needs this set."
+  type        = string
+  default     = null
+}
+
+variable "caller_audiences" {
+  description = "Accepted token audiences: the gateway's own Application ID URI (api://<app-id>). On-behalf-of tokens are minted for this audience, so it is the scope consuming applications request."
+  type        = list(string)
+  default     = []
+}
+
+variable "caller_client_application_ids" {
+  description = "Allow-list of consuming application (client) ids. With on-behalf-of tokens this is still the application, not the user, so it stays the first level of attribution."
+  type        = list(string)
+  default     = []
+}
+
+variable "caller_consumer_names" {
+  description = "Friendly names for consuming applications, keyed by client application id."
+  type        = map(string)
+  default     = {}
+}
+
+variable "user_attribution" {
+  description = <<-EOT
+    Per-user attribution on the gateway. Requires caller_tenant_id. Consuming applications call the
+    gateway with an on-behalf-of token for the signed-in user; the gateway records the user's object id
+    (oid) alongside the application. See docs/obo-integration.md.
+
+    Roll out with require_delegated = false, confirm in the workbook that every application's
+    coverage has reached 100 percent, then switch it on so app-only tokens are refused.
+  EOT
+  type = object({
+    enabled                    = optional(bool, false)
+    user_claim                 = optional(string, "oid")
+    tenant_claim               = optional(string, "tid")
+    require_delegated          = optional(bool, false)
+    tokens_per_minute_per_user = optional(number)
+    token_quota_per_user       = optional(number)
+    token_quota_period         = optional(string, "Daily")
+    partition_cache_by_user    = optional(bool, false)
+  })
+  default = {}
+}
+
+variable "log_analytics_workspace_id" {
+  description = <<-EOT
+    Workspace that receives API Management's built-in LLM logs. Setting it turns on the gateway's
+    diagnostic setting and the streaming backfill: streamed responses carry no token counts the policy
+    can read, so without this they are recorded at zero and cannot be charged to anyone.
+
+    Note that this adds a diagnostic setting to the existing API Management instance and switches it to
+    resource-specific tables. Check for an existing setting sending the same categories to the same
+    workspace first; Azure rejects the duplicate.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "users" {
+  description = "Optional directory of individuals keyed by Entra object id, used only to label the per-user views. Anyone not listed is still attributed, by object id."
+  type = map(object({
+    display_name = optional(string)
+    department   = optional(string)
+    cost_centre  = optional(string)
+  }))
+  default = {}
+}
+
+variable "daily_user_spend_threshold_usd" {
+  description = "Estimated daily spend by one individual that raises an alert. Null disables it."
+  type        = number
+  default     = null
+}
+
+variable "unattributed_user_threshold_percent" {
+  description = "Alert when more than this share of an application's delegated requests reach the gateway without a resolvable user. Null disables it."
+  type        = number
+  default     = 10
+}
