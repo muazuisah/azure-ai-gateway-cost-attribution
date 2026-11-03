@@ -594,6 +594,13 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "unattributed_user_sha
 # If the ledger is short, the chargeback numbers are short too, and the usual cause is the API
 # diagnostic sampling percentage having been moved off 100 by someone trying to save money on
 # Application Insights ingestion.
+#
+# Each request is matched to its own llm.request or llm.error trace by operation_Id, rather than two
+# totals being compared. A shared APIM instance logs every API, and every unmatched-path probe, into the
+# same Application Insights resource, and those would otherwise count as missing ledger rows. Only
+# 2xx and 5xx responses are counted: a 4xx is a rejection that consumed no model, and several are
+# answered by the policy itself without a trace (unknown model, oversized prompt, per-user limit), as is
+# GET /models.
 # ---------------------------------------------------------------------------------------------------
 resource "azurerm_monitor_scheduled_query_rules_alert_v2" "telemetry_gap" {
   count = local.alerts_enabled ? 1 : 0
@@ -614,15 +621,17 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "telemetry_gap" {
 
   criteria {
     query = <<-KQL
-      let ledgerCount = toscalar(
-          traces
-          | where message startswith "llm.request"
-          | count
-      );
+      let gatewayApi = ${jsonencode(var.gateway_api_name == null ? "" : var.gateway_api_name)};
+      let traced = traces
+          | where message startswith "llm.request" or message startswith "llm.error"
+          | distinct operation_Id
+          | extend hasTrace = true;
       requests
-      | where success == true or toint(resultCode) between (200 .. 599)
-      | summarize GatewayRequests = count()
-      | extend LedgerRecords = coalesce(ledgerCount, 0)
+      | where isempty(gatewayApi) or tostring(customDimensions["API Name"]) == gatewayApi
+      | where tostring(customDimensions["Operation Name"]) != "list-models"
+      | where toint(resultCode) between (200 .. 299) or toint(resultCode) >= 500
+      | join kind=leftouter traced on operation_Id
+      | summarize GatewayRequests = count(), LedgerRecords = countif(hasTrace == true)
       | extend MissingPercent = iff(GatewayRequests == 0, 0.0, round(100.0 * (GatewayRequests - LedgerRecords) / GatewayRequests, 2))
       | project MissingPercent
     KQL

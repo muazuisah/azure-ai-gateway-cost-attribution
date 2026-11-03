@@ -434,6 +434,16 @@ variable "unattributed_user_threshold_percent" {
 # the two rather than slowing every stream down.
 # ---------------------------------------------------------------------------------------------------
 
+variable "gateway_api_name" {
+  description = <<-EOT
+    Name of the gateway's LLM API in API Management (the ai-gateway module's api_name output). The
+    telemetry_gap alert counts only that API's requests, so other APIs sharing the APIM instance and its
+    Application Insights resource do not read as missing ledger rows. Leave null to count every request.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "log_analytics_workspace_id" {
   description = <<-EOT
     Resource ID of the Log Analytics workspace that receives the gateway's ApiManagementGatewayLlmLog

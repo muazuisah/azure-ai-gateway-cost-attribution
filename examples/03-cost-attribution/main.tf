@@ -193,6 +193,7 @@ module "cost_attribution" {
 
   application_insights_id = var.application_insights_id
   api_management_id       = var.existing_api_management_id
+  gateway_api_name        = module.ai_gateway.api_name
   metric_namespace        = module.ai_gateway.metric_namespace
 
   consumers    = var.consumers

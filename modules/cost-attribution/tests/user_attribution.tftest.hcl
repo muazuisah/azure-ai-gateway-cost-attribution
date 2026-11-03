@@ -128,6 +128,22 @@ run "sparse_user_directory" {
   }
 }
 
+# ---------------------------------------------------------------------------------------------------
+# The telemetry gap is scoped to the gateway API, so other APIs on a shared instance are not counted.
+# ---------------------------------------------------------------------------------------------------
+run "telemetry_gap_scoped_to_gateway_api" {
+  command = plan
+
+  variables {
+    gateway_api_name = "unit-llm"
+  }
+
+  assert {
+    condition     = strcontains(azurerm_monitor_scheduled_query_rules_alert_v2.telemetry_gap[0].criteria[0].query, "let gatewayApi = \"unit-llm\";")
+    error_message = "The telemetry gap must count only the gateway API's requests."
+  }
+}
+
 run "rejects_malformed_workspace_id" {
   command = plan
 

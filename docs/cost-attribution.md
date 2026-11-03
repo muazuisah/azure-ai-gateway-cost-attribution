@@ -194,11 +194,11 @@ Per application, the percentage of `2xx` requests that do not name a person. Onl
 
 **What it means:** an application has started sending On-Behalf-Of tokens but some of its code paths still call app-only or without the user claim. The usual culprits are a background job, a retry path that builds its own client, or a token cached across users. Until it is fixed, that share of the application's spend can only be charged to the application. See the [OBO integration guide](obo-integration.md).
 
-### `telemetry_gap` — severity 2, 5% over six hours, two failing periods of three
+### `telemetry_gap` — severity 2, 5% over six hours
 
-Compares ledger record count against the APIM `requests` count and fires when more than 5% of requests produced no ledger row.
+Matches each of the gateway API's 2xx and 5xx `requests` to its own `llm.request` or `llm.error` trace by `operation_Id`, and fires when more than 5% have none. It is scoped to `gateway_api_name`, so other APIs and unmatched-path probes on a shared APIM instance do not count. 4xx rejections are excluded because they consume no model and several are answered by the policy without a trace.
 
-**What it means:** chargeback is undercounting. In order of likelihood: the API diagnostic `sampling_percentage` has been moved off 100; the diagnostic `verbosity` is no longer `verbose`, in which case the `trace` policy emits nothing at all; or requests are failing before the outbound section runs and are landing in `llm.error` instead. The first two look like a cost saving at the time somebody makes them. Two failing periods are required so ordinary ingestion-latency skew does not page anyone.
+**What it means:** chargeback is undercounting. In order of likelihood: the API diagnostic `sampling_percentage` has been moved off 100; the diagnostic `verbosity` is no longer `verbose`, in which case the `trace` policy emits nothing at all; or `gateway_api_name` is unset on a shared APIM instance, so other APIs' traffic is being counted. The first two look like a cost saving at the time somebody makes them.
 
 ### `token_burn_rate` — severity 2, optional
 

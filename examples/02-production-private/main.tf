@@ -329,6 +329,7 @@ module "cost_attribution" {
 
   application_insights_id = module.observability.application_insights_id
   api_management_id       = module.ai_gateway.api_management_id
+  gateway_api_name        = module.ai_gateway.api_name
   metric_namespace        = module.ai_gateway.metric_namespace
 
   consumers = var.consumers

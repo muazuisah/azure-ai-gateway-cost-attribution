@@ -232,14 +232,15 @@ path will start failing with `403 delegated_token_required`.
 
 ### `telemetry_gap` — severity 2
 
-**Means:** the proportion of requests arriving without usable telemetry crossed
-5%, evaluated hourly over a six-hour window and requiring two of three failing
-periods before it fires. The tolerance is deliberate: a single sampled hour
-should not page anyone.
+**Means:** more than 5% of the gateway API's 2xx and 5xx requests have no
+matching `llm.request` or `llm.error` trace, evaluated hourly over a six-hour
+window. 4xx rejections are not counted.
 
 **Check:** Application Insights sampling first — it is the most common cause
 and it is a *configuration* problem, not an outage. Then ingestion delay, then
-whether the policy is still emitting the trace.
+whether the policy is still emitting the trace, then whether
+`gateway_api_name` is set (without it, other APIs on a shared APIM instance
+are counted).
 
 **Do:** if sampling is the cause, reduce or disable it for the gateway's
 Application Insights resource. Note what this means while it is firing: **every
