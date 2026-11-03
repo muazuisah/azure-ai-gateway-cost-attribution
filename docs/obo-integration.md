@@ -195,13 +195,16 @@ Backfilled prompts carry no cached-token split, so they are priced at the full i
 
 ## 8. First-deployment checks
 
-These behaviours are documented by Microsoft but have not been verified against a live deployment of
-this repository. Check them on the first test environment:
+Each of these was verified against a live deployment of `examples/03-cost-attribution`, called by a
+regular member user with a delegated token (results in
+[validation §3b](validation.md#3b-per-user-attribution)). Re-run them on every new environment:
 
 1. **LLM log rows exist.** After a streamed call, `ApiManagementGatewayLlmLog | take 10` in the
    workspace returns rows with `PromptTokens` and `CompletionTokens`. Allow 5–10 minutes.
 2. **The join key matches.** For one call, the ledger's `requestId` equals the LLM log's
-   `CorrelationId`. If it does not, `usageSource` stays `none` for streamed rows.
+   `CorrelationId`. If it does not, `usageSource` stays `none` for streamed rows. (Verified: the
+   streamed row was backfilled with `usageSource = "llmlog"` and the same 31 tokens as the
+   equivalent non-streamed call.)
 3. **The diagnostic setting applied cleanly.** If an existing diagnostic setting already sends
    `GatewayLogs` to the same workspace, Azure may reject a second one for the same category; remove
    or import the existing setting.
@@ -209,3 +212,20 @@ this repository. Check them on the first test environment:
    cross-resource `workspace()` query; confirm the rules show as healthy in Azure Monitor.
 5. **`x-ai-user` and the workbook agree.** The object id in the header appears in the
    workbook's *Allocation by individual* section under the right application.
+6. **The audience matches.** A v2 access token carries the gateway application's client id (a bare
+   GUID) in `aud`, not the `api://` URI. List both in `caller_authentication.audiences`, or every
+   delegated call fails `401`.
+
+For a quick smoke test without writing an application, sign in as an ordinary user and use the
+Azure CLI as the consuming application:
+
+```bash
+az login
+TOKEN=$(az account get-access-token --resource <gateway-app-client-id> --query accessToken -o tsv)
+curl https://<apim>.azure-api.net/<path>/openai/v1/chat/completions \
+  -H "api-key: <subscription-key>" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"chat","messages":[{"role":"user","content":"hello"}]}' -i
+```
+
+The response's `x-ai-user` is your object id and `x-ai-consumer` is the Azure CLI's application id.

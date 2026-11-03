@@ -3,7 +3,7 @@
 Production-grade **Terraform** for the two things enterprise AI platforms need together:
 
 1. **Azure API Management as a centralised AI Gateway** — one governed entry point for every Microsoft Foundry (Azure OpenAI) model deployment, with backend pools, circuit breakers, Entra ID authentication, and token governance.
-2. **Per-application cost attribution and chargeback** — defensible answers to *"what did each team spend on AI last month?"*, reconciled against Azure Cost Management.
+2. **Per-application and per-user cost attribution and chargeback** — defensible answers to *"what did each team, and each person in it, spend on AI last month?"*, reconciled against Azure Cost Management.
 
 The second builds on the first and is enabled by a single flag, so you can adopt the gateway now and turn on chargeback when finance asks.
 
@@ -11,7 +11,7 @@ The second builds on the first and is enabled by a single flag, so you can adopt
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Terraform](https://img.shields.io/badge/terraform-%3E%3D1.9-623CE4)](https://developer.hashicorp.com/terraform)
 
-📖 **[Read the documentation site →](https://muazuisah.github.io/azure-ai-gateway-cost-attribution/)** — architecture, policy reference, cost attribution, operations, and eight architecture decision records.
+📖 **[Read the documentation site →](https://muazuisah.github.io/azure-ai-gateway-cost-attribution/)** — architecture, policy reference, cost attribution, the On-Behalf-Of integration guide for per-user attribution, operations, and nine architecture decision records.
 
 ---
 
@@ -35,7 +35,7 @@ A single, governed entry point for every Foundry model in your organization.
 
 ### Layer 2 — Cost attribution
 
-Answer "what did each application spend on AI last month?" — defensibly.
+Answer "what did each application — and each person using it — spend on AI last month?" — defensibly.
 
 - Per-request token accounting across **input, cached input, cache write, output, and reasoning** token classes.
 - Cost rates generated from the **Azure Retail Prices API**, expressed per 1 000 000 tokens, versioned with `effectiveDate`.
@@ -49,15 +49,23 @@ Answer "what did each application spend on AI last month?" — defensibly.
 
 ```mermaid
 flowchart LR
-    C["Consumer apps<br/>OpenAI-compatible SDK"] --> P["APIM Products<br/><i>quota boundary</i>"]
-    P --> G["AI Gateway API<br/><i>validate → limit → safety → route</i>"]
+    U["Signed-in user"] -. "sign-in" .-> C
+    C["Consumer apps<br/>OpenAI-compatible SDK"] -- "subscription key<br/>+ Entra token (app or OBO user)" --> P["APIM Products<br/><i>quota boundary</i>"]
+    P --> G["AI Gateway API<br/><i>validate → identify app + user<br/>→ limit → safety → route</i>"]
     G --> POOL["Backend pools<br/><i>priority + circuit breakers</i>"]
     POOL --> F1["Foundry · PTU"]
     POOL --> F2["Foundry · Standard"]
     POOL --> F3["Foundry · Secondary region"]
-    G -.-> O["App Insights · Log Analytics<br/>token metrics · cost events"]
-    O -.-> CB["Chargeback workbook<br/>+ Cost Management reconciliation"]
+    G -.-> O["App Insights ledger<br/>cost events · consumer · user"]
+    G -.-> L["Log Analytics<br/>LLM logs · streamed token usage"]
+    O -.-> CB["Chargeback workbook<br/>per product · app · user<br/>+ Cost Management reconciliation"]
+    L -.-> CB
 ```
+
+With an On-Behalf-Of token, every ledger entry carries the calling application *and* the signed-in
+user's object ID, so spend is allocated first to the application and then to the people using it.
+Streamed responses are costed from API Management's LLM logs instead of being buffered. See the
+[OBO integration guide](docs/obo-integration.md).
 
 Full detail, including request lifecycle, failover semantics, and the cost model: **[`docs/architecture.md`](docs/architecture.md)**.
 
@@ -175,12 +183,45 @@ The pricing map is the part worth your attention: the ledger is only as truthful
 give it. See [`docs/cost-attribution.md`](docs/cost-attribution.md) for the model, including why the
 per-request figure is a defensible estimate rather than an invoice.
 
+### Turn on per-user attribution
+
+Subscription keys can only ever name an application. To attribute spend to the person using it, the
+consuming application signs the user in and calls the gateway with an Entra **On-Behalf-Of** token
+alongside its subscription key. In example 03's `terraform.tfvars`:
+
+```hcl
+caller_tenant_id              = "<tenant-id>"
+caller_audiences              = ["api://contoso-ai-gateway"]
+caller_client_application_ids = ["<consuming-app-client-id>"]
+
+user_attribution = {
+  enabled                    = true
+  require_delegated          = false   # true once every application sends OBO tokens
+  tokens_per_minute_per_user = 20000
+  token_quota_per_user       = 2000000
+  token_quota_period         = "Daily"
+}
+
+# Needed for streamed responses: the LLM logs are the only record of what they consumed.
+log_analytics_workspace_id = "<log-analytics-workspace-resource-id>"
+
+# Labels only. Anyone not listed is still attributed, by object id.
+users = {
+  "<user-object-id>" = { display_name = "Ada Lovelace", department = "Claims", cost_centre = "CC-1001" }
+}
+```
+
+Any member or guest user who can obtain a token for a pre-authorized client application is
+attributed — there is no per-user onboarding. The app registration, token flow and client code are in
+the [OBO integration guide](docs/obo-integration.md); the reasoning is in
+[ADR-0009](docs/decisions/0009-individual-attribution-obo.md).
+
 ---
 
 ## Proof it works
 
 This is not a design sketch. Both examples were deployed to a real subscription, driven with real
-traffic, and measured. The full write-up — method, raw results, and the eighteen defects that only a live
+traffic, and measured. The full write-up — method, raw results, and the twenty defects that only a live
 deployment could surface — is in [`docs/validation.md`](docs/validation.md).
 
 **Chargeback ledger, queried from a running deployment:** four consumers across three products, two
@@ -217,6 +258,38 @@ Three properties matter here, and each one is a thing a naive implementation get
 
 Sum `estimatedCostUSD + costAvoidedUSD` to reconstruct what the traffic would have cost without the
 cache; sum `estimatedCostUSD` alone for what Azure actually billed.
+
+**Per-user attribution**, measured on a live gateway: a regular member account signed in through a
+pre-authorized client (Azure CLI) and called the gateway with a delegated Entra token plus a
+subscription key — one non-streamed chat, one streamed chat, one embedding — against `gpt-5.5` and
+`text-embedding-3-large`. Every row is read back from the live ledger.
+
+| Operation | Streamed | Consumer | User (`oid`) | Token type | Usage source | Prompt | Completion | Total | `estimatedCostUSD` |
+| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| `chat` | no | `azure-cli` | `aba35792-…` | delegated | policy | 13 | 18 | 31 | 0.000605 |
+| `chat` | yes | `azure-cli` | `aba35792-…` | delegated | LLM log | 13 | 18 | 31 | 0.000605 |
+| `embed` | no | `azure-cli` | `aba35792-…` | delegated | policy | 3 | 0 | 3 | 0.00000039 |
+| **Total** | | | | | | | | **65** | **0.00121** |
+
+The same traffic, rolled up in the chargeback workbook's *Allocation by individual* view (the name,
+department and cost centre come from the `users` map; the user is attributed by object ID either way):
+
+| Individual | Department | Cost centre | Application | Operations | Requests | Tokens | Share of app | Estimated USD | Allocated USD |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Muazu Isah | AI Platform | CC-TEST | `azure-cli` | chat, embed | 3 | 65 | 100% | $0.0012 | $0.0012 |
+
+What this proves:
+
+- **Every request names both the application and the person.** The gateway returned
+  `x-ai-consumer: azure-cli` and `x-ai-user: <oid>` on each response, and the ledger agrees.
+- **Streamed traffic is not a blind spot.** The policy cannot read usage from a streamed body without
+  buffering it, so that row is costed from API Management's LLM log instead (`usageSource = llmlog`) —
+  same 31 tokens as the non-streamed call, without slowing the stream.
+- **Anonymous traffic is refused and still recorded.** A call with no subscription key and a call with
+  no bearer token both returned `401` and were written to the ledger as `consumer = unauthenticated`,
+  `user = none`.
+- **The guard-rail alerts were quiet for the right reason:** 0% unmeasured usage, 0% unattributed
+  users, 0% telemetry gap.
 
 **Every cost attribute the gateway promises, queried from the live ledger** — per-request detail,
 cache economics, and attribution rolled up by consumer, product and model:
@@ -332,6 +405,9 @@ Full variable reference: [`modules/ai-gateway/README.md`](modules/ai-gateway/REA
 | Ratio allocation against Cost Management, not raw gateway estimates | Survives contact with a finance team; immune to discounts and reservations | [0004](docs/decisions/0004-ratio-allocation-chargeback.md) |
 | App Insights verbosity and sampling pinned for the LLM API | The `trace` policy silently undercounts at default settings — the most common cost-tracking bug | [0005](docs/decisions/0005-telemetry-sink-selection.md) |
 | Alias routing with GA primitives rather than the preview unified model API | Preview features do not belong in a reusable production accelerator yet; migration path documented | [0006](docs/decisions/0006-alias-routing-vs-unified-model-api.md) |
+| Microsoft Entra ID tokens for caller authentication, not subscription keys alone | A key identifies a subscription, not an application; a validated token names the caller | [0007](docs/decisions/0007-entra-id-caller-authentication.md) |
+| Context-length pricing tiers in the pricing map | Long-context requests are billed at a higher rate; a flat rate under-charges them silently | [0008](docs/decisions/0008-context-length-pricing-tiers.md) |
+| Per-user attribution from On-Behalf-Of tokens, two-level allocation (app → user) | The user's identity must come from a validated token, not a header the caller can set; allocation stays reconcilable to the app total | [0009](docs/decisions/0009-individual-attribution-obo.md) |
 
 ---
 

@@ -18,6 +18,16 @@ against a live subscription, and several needed live traffic on top of that.
 | Examples | `01-quickstart`, `02-production-private`, `03-cost-attribution` |
 | Semantic cache | Azure Managed Redis `Balanced_B0`, RediSearch |
 
+Per-user attribution (§3b) was validated separately, by layering example 03 onto an existing
+API Management instance:
+
+| | |
+|---|---|
+| Gateway | API Management, existing instance, `caller_authentication = both`, user attribution on |
+| Models | `gpt-5.5` (chat) and `text-embedding-3-large` (embed) |
+| Caller | a regular member account in the gateway's tenant, signed in through Azure CLI as the pre-authorized client application |
+| Streaming backfill | gateway LLM logs to a Log Analytics workspace, `log_analytics_workspace_id` set |
+
 ---
 
 ## 1. What was tested
@@ -34,6 +44,10 @@ against a live subscription, and several needed live traffic on top of that.
 | Semantic cache economics | 3 prompts × 3 passes, cache on | 6 hits priced at 0, 66.7 % cost avoided |
 | Content safety | prompts from 5 k to 16 k characters | limit found and handled |
 | Pricing map | `scripts/generate_pricing_map.py` | live Azure retail prices API |
+| Per-user attribution | delegated (OBO) token + subscription key: chat, streamed chat, embedding | every row names app **and** user |
+| Streamed usage backfill | streamed chat, joined to `ApiManagementGatewayLlmLog` on `requestId` | 31 tokens backfilled, `usageSource = llmlog` |
+| Anonymous callers | no subscription key; no bearer token | `401`, recorded as `unauthenticated` / `none` |
+| Per-user workbook and alerts | *Allocation by individual*, user spend, unattributed users, unmeasured, telemetry gap | named row, $0.0012; guard-rail alerts at 0 % |
 
 ---
 
@@ -121,10 +135,66 @@ Points worth drawing out:
   requests and 65 failed requests carry no usage, because a streamed response has no usage block the
   gateway can read and a rejected request never reached a model. Reporting those as zero would
   quietly understate spend; reporting them as unmeasured makes the gap visible and quantifiable.
+  This run predates the streaming backfill; with `log_analytics_workspace_id` set, streamed rows are
+  now costed from API Management's LLM log, as §3b shows.
 - **`estimatedCostUSD` is the gateway's own calculation**, from a pricing map generated against the
   live Azure retail prices API, and is reconciled against the real bill in the deployed workbook.
   Per-request costs run to eight decimal places — a ten-token embedding costs about `0.00000078` USD,
   which is why the field is formatted at that precision rather than rounded to cents.
+
+---
+
+## 3b. Per-user attribution
+
+A regular member account — not an administrator, not a guest — signed in with Azure CLI, which was
+pre-authorized as a client application on the gateway's app registration, and requested a delegated
+token for the gateway's API. Its claims were the ones a real consuming application's On-Behalf-Of
+token carries: `azp` = the client application, `oid` = the user, `scp = user_impersonation`. Three
+requests were sent with that token **and** a subscription key, then read back out of the ledger.
+
+**The ledger, row by row:**
+
+| Operation | Streamed | Consumer | User (`oid`) | `userType` | `usageSource` | Prompt | Completion | Total | `estimatedCostUSD` |
+| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| `chat` | no | `azure-cli` | `aba35792-…` | delegated | `policy` | 13 | 18 | 31 | 0.000605 |
+| `chat` | yes | `azure-cli` | `aba35792-…` | delegated | `llmlog` | 13 | 18 | 31 | 0.000605 |
+| `embed` | no | `azure-cli` | `aba35792-…` | delegated | `policy` | 3 | 0 | 3 | 0.00000039 |
+| **Total** | | | | | | | | **65** | **0.00121** |
+
+The consumer is the client application's id, `04b07795-…`, shown by name through the consumer
+registry. Every successful response carried `x-ai-consumer: azure-cli` and `x-ai-user: <oid>`.
+
+**The workbook's *Allocation by individual* view**, for the same window:
+
+| Individual | Department | Cost centre | Application | Operations | Requests | Tokens | Share of app | Estimated USD | Allocated USD |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Muazu Isah | AI Platform | CC-TEST | `azure-cli` | chat, embed | 3 | 65 | 100 % | $0.0012 | $0.0012 |
+
+The name, department and cost centre come from the `users` map; nothing about them is read from the
+token. Remove the entry and the row is still there, keyed by object id.
+
+**Requests that must not be attributed:**
+
+| Request | Status | Ledger `consumerId` | Ledger `userId` |
+| --- | --- | --- | --- |
+| Bearer token, no subscription key | `401` `SubscriptionKeyNotFound` | `unauthenticated` | `none` |
+| Subscription key, no bearer token | `401` `TokenNotPresent` | `unauthenticated` | `none` |
+
+**Alerts over the same window:** per-user daily spend $0.0012 against a $5 threshold, unmeasured
+usage 0 %, unattributed users 0 %, telemetry gap 0 %.
+
+Points worth drawing out:
+
+- **The streamed row is not a hole any more.** The policy still refuses to buffer a stream, so it
+  wrote the row with no usage; the ledger query then joined it to `ApiManagementGatewayLlmLog` on
+  `requestId` and filled in exactly the tokens the identical non-streamed call measured. The
+  backfill has no cached-token or reasoning split, so a backfilled prompt is priced at the full
+  input rate.
+- **"Regular user" is the point.** Nothing in the path depends on the account's role. Any member or
+  guest who can obtain a token for a pre-authorized client application is attributed, with no
+  per-user onboarding.
+- **Sub-cent spend is real spend.** At three requests the total is a tenth of a cent, which the
+  workbook first displayed as `$0.00` — defect 20.
 
 ---
 
@@ -458,6 +528,32 @@ name also returns 502. Examples 01 and 03 ship different product names, so it ha
 Product display names now default to the key qualified by `name_prefix`. That is an in-place update,
 not a replacement, so existing deployments see a rename and nothing more.
 
+### 19. The telemetry-gap alert measured the wrong denominator
+
+On the first per-user run the telemetry-gap alert reported **92.68 %** of requests missing from the
+ledger, on a gateway that had in fact recorded every one.
+
+The alert compared the count of ledger traces with the count of *every* request Application
+Insights held. On a shared API Management instance that includes other APIs, probes against paths
+that match no operation (`404`), and requests rejected before the gateway policy ran — none of which
+ever produce a ledger row. The more the instance was used for anything else, the worse the gap
+looked.
+
+The alert now looks only at requests on the gateway API (the new optional `gateway_api_name` input,
+wired in examples 02 and 03), and only at `2xx` and `5xx` responses, and matches each one to its own
+`llm.request` or `llm.error` trace by `operation_Id` instead of comparing totals. On the same traffic
+it reports 0 %.
+
+### 20. Small spend was displayed as zero
+
+The *Allocation by individual* view showed one user at **$0.00 estimated, $0.00 allocated** after
+three successful requests. The ledger held `0.00121`. The workbook queries rounded USD sums to two
+decimals and the grid's currency formatter showed two digits, so any user or application below half
+a cent read as free — exactly the people a per-user view exists to show.
+
+The queries now keep six decimals (four for cost per thousand tokens) and every USD column displays
+up to four. The same row now reads $0.0012 / $0.0012.
+
 ---
 
 ## 5. Reproducing this
@@ -475,6 +571,26 @@ python scripts/generate_demo_traffic.py --base-url <url> \
 ```
 
 Give Application Insights a few minutes to ingest, then open the chargeback workbook.
+
+To reproduce the per-user results, set the caller and `user_attribution` variables in example 03
+(see the [OBO integration guide](obo-integration.md)), add Azure CLI's application id
+`04b07795-8ddb-461a-bbee-02f9e1bf7b46` to the gateway app registration's pre-authorized clients and
+to `caller_client_application_ids`, then sign in as an ordinary user:
+
+```bash
+az login --tenant <tenant-id>
+TOKEN=$(az account get-access-token --resource <gateway-app-client-id> --query accessToken -o tsv)
+
+curl -s "$GATEWAY/chat/completions" \
+  -H "api-key: <subscription-key>" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"chat","messages":[{"role":"user","content":"Hello"}]}' -D - | grep -i '^x-ai-'
+```
+
+Use the gateway app's client id (the bare GUID) as the resource: a v2 token's audience is that GUID,
+not the `api://` URI, so both forms belong in `caller_audiences`. Repeat with `"stream": true` and
+against the embedding alias, then check the ledger's `usageSource` and the *Allocation by
+individual* view once the LLM logs have been ingested (allow up to fifteen minutes).
 
 Two caveats for anyone repeating the load-balancing test. Weighted distribution is only meaningful
 when the primary is not throttling, so give the deployments enough capacity for the request rate

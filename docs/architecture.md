@@ -7,7 +7,7 @@ This document describes two deployable scopes that are deliberately layered:
 | Scope | Name | What it delivers |
 | --- | --- | --- |
 | **Layer 1** | **AI Gateway** | A production-grade, centralized APIM entry point in front of Foundry model deployments: identity, routing, resiliency, throttling, safety, observability. |
-| **Layer 2** | **Cost Attribution** | Per-consumer token and cost accounting on top of Layer 1, plus reconciliation against authoritative Azure billing. |
+| **Layer 2** | **Cost Attribution** | Per-application and, with On-Behalf-Of tokens, per-user token and cost accounting on top of Layer 1, plus reconciliation against authoritative Azure billing. |
 
 Layer 2 is a strict superset of Layer 1. It is enabled with a single feature flag (`enable_cost_attribution = true`) and adds no new request-path dependencies that can fail the gateway.
 
@@ -20,7 +20,7 @@ Organizations adopting Foundry models hit the same five problems as they move fr
 1. **Sprawl.** Every team provisions its own Foundry resource and keys. There is no inventory, no common policy, and no way to rotate credentials.
 2. **Quota contention.** One noisy application consumes the tokens-per-minute (TPM) quota of a shared deployment and starves everyone else.
 3. **Fragility.** A single regional deployment returns `429` with a long `Retry-After`, and every downstream app fails.
-4. **Opacity.** Azure bills at the level of the Foundry *resource*. Finance cannot answer "what did the claims-triage app cost us last month?"
+4. **Opacity.** Azure bills at the level of the Foundry *resource*. Finance cannot answer "what did the claims-triage app cost us last month?" — let alone "which of its users drove that cost?"
 5. **Ungoverned content.** Prompts and completions are not moderated, logged, or auditable.
 
 A centralized AI gateway solves all five, provided it is built on native platform capability rather than bespoke policy code.
@@ -48,9 +48,11 @@ These principles drove every decision in this accelerator, and each one is trace
 
 ```mermaid
 flowchart LR
+    USR["Signed-in users"]
+
     subgraph Consumers["Consumer applications"]
         A1["App A<br/>(APIM subscription key<br/>or Entra ID token)"]
-        A2["App B"]
+        A2["App B<br/>(key + On-Behalf-Of<br/>user token)"]
         A3["Agent / MCP client"]
     end
 
@@ -58,7 +60,7 @@ flowchart LR
         direction TB
         PROD["Products<br/><i>quota + rate boundary</i>"]
         API["LLM API<br/><code>/openai/v1/*</code>"]
-        POL["Policy pipeline<br/><i>validate → limit → safety → route</i>"]
+        POL["Policy pipeline<br/><i>validate → identify app + user<br/>→ limit → safety → route</i>"]
         POOL["Backend pools<br/><i>priority + weighted LB</i>"]
         CB["Circuit breakers<br/><i>per backend</i>"]
     end
@@ -79,6 +81,7 @@ flowchart LR
     CS["Azure AI Content Safety"]
     REDIS["Managed Redis<br/><i>(optional semantic cache)</i>"]
 
+    USR -. "sign-in (OBO)" .-> A2
     A1 & A2 & A3 --> PROD --> API --> POL
     POL <--> CS
     POL <--> REDIS
@@ -86,8 +89,8 @@ flowchart LR
     CB --> F1
     CB --> F2
     CB --> F3
-    POL -. "token metrics<br/>+ request telemetry" .-> AI
-    APIM -. "diagnostics" .-> LAW
+    POL -. "token metrics<br/>+ cost ledger (app + user)" .-> AI
+    APIM -. "diagnostics + LLM logs<br/>(streamed token usage)" .-> LAW
     POL -. "llm-emit-token-metric" .-> MET
 
     classDef gw fill:#0b5394,stroke:#073763,color:#fff
@@ -110,10 +113,19 @@ sequenceDiagram
     participant F as Foundry deployment
     participant AI as App Insights
 
-    C->>G: POST /openai/v1/chat/completions<br/>{ "model": "gpt-chat" }
+    C->>G: POST /openai/v1/chat/completions<br/>{ "model": "gpt-chat" }<br/>api-key + Bearer (app or OBO user token)
     G->>G: Validate subscription / Entra token
+    G->>G: Resolve consumer (appid/azp) and,<br/>for a delegated token, user (oid)
+    alt missing or invalid credential
+        G-->>C: 401 (recorded as consumer "unauthenticated")
+    else require_delegated and token names no user
+        G-->>C: 403 delegated_token_required
+    end
     G->>G: Resolve alias → route (named value)
     G->>G: llm-token-limit (TPM + quota, per subscription)
+    opt user attribution enabled
+        G->>G: llm-token-limit per consumer:user
+    end
     alt limit exceeded
         G-->>C: 429 (rate) / 403 (quota) + Retry-After
     end
@@ -131,10 +143,11 @@ sequenceDiagram
         Note over P,F: Circuit breaker trips,<br/>honours Retry-After
         P->>F: Priority group 2 (Standard, other region)
     end
-    F-->>G: 200 + usage{...}
-    G->>G: Extract tokens, compute cost (Layer 2)
-    G->>AI: Custom event + token metric
-    G-->>C: 200 + x-* governance headers
+    F-->>G: 200 + usage{...} (or SSE stream)
+    G->>G: Extract tokens, compute cost (Layer 2)<br/>streamed: left unmeasured, never buffered
+    G->>AI: Ledger entry (consumer, user, tokens, cost) + token metric
+    Note over G,AI: Streamed usage is backfilled later from<br/>ApiManagementGatewayLlmLog, joined on requestId
+    G-->>C: 200 + x-* governance headers<br/>(x-ai-consumer, x-ai-user)
 ```
 
 ### 3.3 Component decisions
@@ -295,19 +308,22 @@ Create projects when the platform you are building is more than an inference pro
 
 ### 4.1 The core insight
 
-Azure bills Foundry at the granularity of **resource × meter × region**. Your internal chargeback question is at the granularity of **application × model × time**. Nothing in the Azure billing pipeline knows about your applications. The gateway is the only place where both facts are simultaneously true, so the gateway must be the point of record for *allocation* — while Azure remains the point of record for *amount*.
+Azure bills Foundry at the granularity of **resource × meter × region**. Your internal chargeback question is at the granularity of **application × model × time** — and, increasingly, **user × application × time**. Nothing in the Azure billing pipeline knows about your applications. The gateway is the only place where both facts are simultaneously true, so the gateway must be the point of record for *allocation* — while Azure remains the point of record for *amount*.
 
 ```mermaid
 flowchart TB
     subgraph GW["Gateway — knows WHO"]
-        T["Per-request record:<br/>product, subscription, alias,<br/>prompt/cached/output/reasoning tokens"]
+        T["Per-request record:<br/>product, consumer app, user (oid),<br/>alias, prompt/cached/output/reasoning tokens"]
+        LL["LLM log<br/><i>streamed token usage</i>"]
     end
     subgraph AZ["Azure billing — knows HOW MUCH"]
         CM["Cost Management export<br/>resource × meter × day"]
     end
-    T --> ALLOC["Allocation ratios<br/><i>share of tokens per consumer</i>"]
+    LL -. "backfill on requestId" .-> T
+    T --> ALLOC["Level 1: app share<br/><i>share of tokens per consumer</i>"]
+    ALLOC --> UALLOC["Level 2: user share<br/><i>share of the app's tokens per user</i>"]
     CM --> ACTUAL["Authoritative daily spend"]
-    ALLOC --> CHARGE["Chargeback ledger"]
+    UALLOC --> CHARGE["Chargeback ledger"]
     ACTUAL --> CHARGE
     CHARGE --> WB["Workbook · budgets · anomaly alerts"]
 ```
@@ -317,6 +333,8 @@ This "**ratio allocation**" model is materially more defensible than publishing 
 The shipped workbook allocates on each consumer's **share of total tokens** across all models, not per meter. Per-meter allocation would be more precise where consumers use different model mixes — an output token on a premium model costs many times an input token on a small one — and it is the natural next refinement. It is not what the workbook does today.
 
 The accelerator publishes **both** numbers and the variance between them. A persistent variance is a signal that your pricing map is stale.
+
+**Per-user allocation is a second level, not a separate ledger.** When callers send an On-Behalf-Of token, the gateway reads the calling application from `appid`/`azp` exactly as before and the user from the token's `oid`, so one validated credential yields both. Each application's allocated spend is then split across its users by their share of that application's tokens, which means the user figures always sum to the application figure and the application figures always sum to the Cost Management total. App-only tokens are recorded with `userType = "app"` and no user rather than being charged to a person. Names, departments and cost centres are joined at report time from the `users` map; anyone not listed is still attributed by object id. See [ADR-0009](decisions/0009-individual-attribution-obo.md) and the [OBO integration guide](obo-integration.md).
 
 ### 4.2 Telemetry sinks, and an honest warning
 
@@ -414,11 +432,15 @@ flowchart LR
         W4["Estimated vs actual variance %"]
         W5["Top 20 most expensive<br/>request patterns"]
         W6["Quota burn-down<br/>per product"]
+        W7["Allocation by individual<br/>(user × app, estimated + allocated)"]
     end
     subgraph AL["Alerting"]
         A1["Budget threshold per product"]
         A2["Daily spend anomaly"]
         A3["Variance > 10% for 3 days<br/><i>→ pricing map is stale</i>"]
+        A4["Daily spend per user"]
+        A5["Unattributed users %<br/><i>→ an app is not sending OBO tokens</i>"]
+        A6["Unmeasured usage % ·<br/>telemetry gap"]
     end
 ```
 
@@ -591,6 +613,7 @@ Where data residency is a constraint, deploy one gateway per data zone and use `
 | Concern | Mechanism |
 | --- | --- |
 | Onboarding a new consumer | Add an entry to `var.products` / `var.subscriptions`; Terraform issues keys and quota. |
+| Attributing a consumer's users | Pre-authorize the app's client id on the gateway's app registration, add it to `caller_client_application_ids`, and have it send an On-Behalf-Of token. No per-user onboarding — anyone signed in is attributed by object id; add them to `var.users` only to label them. See [`obo-integration.md`](obo-integration.md). |
 | Adding a model | Add a deployment to `var.model_deployments` and a route to `var.model_routes`. Parity is validated at plan time. |
 | Retiring a model | Point the alias at a new deployment. Clients are unaffected. |
 | Regional outage | Circuit breakers trip automatically; traffic moves to the next priority group. Alert fires on breaker trips. |
@@ -603,7 +626,8 @@ Where data residency is a constraint, deploy one gateway per data zone and use `
 ## 10. Limits and honest caveats
 
 - **Token counters are per-gateway-unit and per-region.** They are not globally aggregated. With multiple scale units, effective limits are higher than the configured number. Size with that in mind, and treat `llm-token-limit` as protection against runaway consumption rather than a precise billing meter.
-- **Streamed requests are reported as unmeasured in the ledger, not as zero.** The ledger parses a JSON response body; a streamed response is `text/event-stream`, so it carries no parsable usage block and the record is flagged `usageMeasured = false`. Streaming usage reaches the token *metrics* via `llm-emit-token-metric` (the policy forces `stream_options.include_usage` on), but it does not reach the per-request ledger. Watch the *Unmeasured %* figure in the workbook: a chargeback period with heavy streaming traffic has a hole in it that ratio allocation will spread across everyone else.
+- **Streamed requests are measured from API Management's LLM logs, not by the policy.** The policy parses a JSON response body; a streamed response is `text/event-stream`, so the policy records it `usageMeasured = false` rather than buffering it. With `log_analytics_workspace_id` set, the ledger backfills those rows from `ApiManagementGatewayLlmLog`, joined on `requestId`, and marks them `usageSource = "llmlog"`. The backfill is coarser than a measured row: the LLM log has no cached-token, cache-write or reasoning split, so a backfilled prompt is priced at the full input rate, and a terminated stream may log incomplete usage. **Without the workspace id there is no backfill** and streamed requests stay unmeasured in the ledger (they still reach the token *metrics* via `llm-emit-token-metric`). Watch the *Unmeasured %* figure in the workbook: a hole there is spread across everyone else by ratio allocation.
+- **Per-user attribution is only as good as the tokens callers send.** A subscription key or an app-only token names an application, never a person; those requests are attributed to the application with no user, and the *unattributed users* alert measures how much of the spend that is. Set `user_attribution.require_delegated = true` once every consumer sends On-Behalf-Of tokens to refuse the rest. The ledger stores the Entra object id only; display names come from the `users` map, not from the token.
 - **An outbound policy that reads the response body disables streaming.** API Management buffers the whole response if the policy document contains an expression touching `context.Response.Body`, whether or not that expression actually runs. The gateway therefore skips the body read entirely for streamed requests rather than guarding inside it. Measured against this accelerator: with the read unguarded, 50 SSE chunks were released within 1 ms; with it skipped, they arrived over 0.33 s, matching Foundry directly. If you add outbound policy that inspects the body, wrap it the same way or streaming will silently stop working.
 - **A pool holds at most 30 backends**, and **one circuit breaker rule per backend**.
 - **The unified model API** (a native APIM feature that fronts multiple providers with automatic format translation) is **in preview** at time of writing. The accelerator implements alias routing with GA primitives instead, and documents the migration path in [ADR-0006](decisions/0006-alias-routing-vs-unified-model-api.md).
@@ -615,6 +639,8 @@ Where data residency is a constraint, deploy one gateway per data zone and use `
 ## 11. Where to go next
 
 - [`docs/cost-attribution.md`](cost-attribution.md) — the chargeback model in depth, KQL queries, reconciliation procedure.
+- [`docs/obo-integration.md`](obo-integration.md) — per-user attribution: app registrations, On-Behalf-Of token flow, client code, first-deployment checks.
 - [`docs/policies.md`](policies.md) — annotated walkthrough of every policy fragment.
+- [`docs/validation.md`](validation.md) — live-deployment evidence, including per-user results.
 - [`docs/operations.md`](operations.md) — day-2 runbook.
 - [`docs/decisions/`](decisions/) — architecture decision records.

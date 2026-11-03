@@ -203,9 +203,12 @@ Note what this does **not** do. It does not put streamed requests in the
 chargeback ledger. The ledger is built in §10 from a parsed JSON response body,
 and a streamed response is `text/event-stream`, so §10 skips it and records the
 request as `usageMeasured = false`. That is deliberate — see §10 — and it means
-streamed traffic is counted in the metrics but reported as *unmeasured*, not as
-zero, in the ledger. Unmeasured is visible and alertable; zero would silently
-under-bill every streaming consumer.
+the policy reports streamed traffic as *unmeasured*, not as zero. Unmeasured is
+visible and alertable; zero would silently under-bill every streaming consumer.
+When the cost-attribution module is given `log_analytics_workspace_id`, the
+ledger then backfills those rows from API Management's LLM log
+(`usageSource = "llmlog"`), so streamed requests are costed — and attributed
+per user — without the gateway ever buffering a stream.
 
 ### §5 — Token metric emission
 
