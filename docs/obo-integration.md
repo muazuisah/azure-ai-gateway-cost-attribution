@@ -217,7 +217,25 @@ regular member user with a delegated token (results in
    delegated call fails `401`.
 
 For a quick smoke test without writing an application, sign in as an ordinary user and use the
-Azure CLI as the consuming application:
+Azure CLI as the consuming application. [`scripts/call_as_user.py`](../scripts/call_as_user.py)
+does this for you: it gets the delegated token, shows whose it is, sends chat, streamed and
+embedding calls, and fails unless every response's `x-ai-user` is the signed-in user:
+
+```bash
+export AI_GATEWAY_ENDPOINT=https://<apim>.azure-api.net/<path>/openai/v1
+export AI_GATEWAY_KEY=<subscription-key>          # omit in Entra-only mode
+export AI_GATEWAY_APP_ID=<gateway-app-client-id>
+az login
+python scripts/call_as_user.py
+
+# As someone else, without signing yourself out: a separate CLI profile per person.
+python scripts/call_as_user.py --az-config-dir ~/.uca/alice --login --device-code --tenant <tenant-id>
+python scripts/call_as_user.py --az-config-dir ~/.uca/alice --repeat 3 --brief
+```
+
+Open the device-code page in a private browser window so it does not sign you in as yourself.
+The script needs only Python and the Azure CLI, and exits non-zero on any failed or
+mis-attributed call. The same check by hand:
 
 ```bash
 az login

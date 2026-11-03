@@ -196,6 +196,51 @@ Points worth drawing out:
 - **Sub-cent spend is real spend.** At three requests the total is a tenth of a cent, which the
   workbook first displayed as `$0.00` — defect 20.
 
+### Several people through the same application
+
+The same application (Azure CLI) was then used by four people: the account above plus three
+newly created member accounts with no roles and no per-user gateway configuration. Each signed in
+to its own Azure CLI profile and called the gateway with
+[`scripts/call_as_user.py`](../scripts/call_as_user.py), with a deliberately different mix of
+traffic:
+
+| Person | Traffic sent |
+| --- | --- |
+| Alice | chat, streamed chat and embeddings, three times each, plus one chat |
+| Bob | chat only, eight requests |
+| Carol | embeddings and streamed chat, four times each |
+| Muazu | a mix of all three, from the earlier runs |
+
+Every response carried `x-ai-consumer: azure-cli` and the caller's own object id in `x-ai-user`;
+the script checks the second against the token, and every call passed. Three of those people were
+then added to the `users` map, and the deployed workbook's *Allocation by individual* query
+returned:
+
+| Individual | Department | Cost centre | Application | Models | Requests | Tokens | Share of app | Estimated USD | Allocated USD |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Bob Test | Finance | CC-2002 | `azure-cli` | chat | 8 | 461 | 28.1 % | $0.0105 | $0.0105 |
+| Muazu Isah | AI Platform | CC-TEST | `azure-cli` | chat, embed | 13 | 496 | 30.2 % | $0.0104 | $0.0104 |
+| Alice Test | Claims | CC-1001 | `azure-cli` | chat, embed | 10 | 404 | 24.6 % | $0.0083 | $0.0083 |
+| Carol Test | Research | CC-3003 | `azure-cli` | chat, embed | 8 | 281 | 17.1 % | $0.0055 | $0.0055 |
+| **Total** | | | | | **39** | **1,642** | **100 %** | **$0.0348** | **$0.0348** |
+
+The coverage tile over the same window: 4 individuals, 100 % of tokens attributed to a person, 0 %
+app-only, 0 % unattributed.
+
+- **One application, four bills.** Application-level attribution alone would have reported a single
+  `azure-cli` line of $0.0348; the individual view splits it by person, department and cost centre.
+- **Cost follows what was used, not just how much.** Bob used fewer tokens than Muazu but cost more,
+  because all of his were chat completions; Carol's traffic was mostly embeddings, the cheapest per
+  token. Per-request pricing in the gateway carries that through to the person.
+- **Carol's streamed calls are costed.** Half her requests were streamed; they were backfilled from
+  the LLM log rather than reported as unmeasured.
+- **New users need no onboarding.** The three accounts were attributed from their first request.
+  The `users` map only adds names, departments and cost centres; it is not an allow-list.
+- **Test accounts and MFA.** In a tenant whose Conditional Access requires MFA for every sign-in, a
+  new account cannot sign in with a password alone. A
+  [Temporary Access Pass](https://learn.microsoft.com/entra/identity/authentication/howto-authentication-temporary-access-pass)
+  satisfies the policy without registering a method; the accounts were deleted afterwards.
+
 ---
 
 ## 4. Defects found and fixed
@@ -591,6 +636,20 @@ Use the gateway app's client id (the bare GUID) as the resource: a v2 token's au
 not the `api://` URI, so both forms belong in `caller_audiences`. Repeat with `"stream": true` and
 against the embedding alias, then check the ledger's `usageSource` and the *Allocation by
 individual* view once the LLM logs have been ingested (allow up to fifteen minutes).
+
+[`scripts/call_as_user.py`](../scripts/call_as_user.py) does all of that in one command and checks
+each response's `x-ai-user` against the token. To act as several people, give each one a separate
+Azure CLI profile and sign in with a device code in a private browser window:
+
+```bash
+export AI_GATEWAY_ENDPOINT=https://<apim>.azure-api.net/<path>/openai/v1
+export AI_GATEWAY_KEY=<subscription-key>
+export AI_GATEWAY_APP_ID=<gateway-app-client-id>
+
+python scripts/call_as_user.py                                   # as the user az is signed in as
+python scripts/call_as_user.py --az-config-dir ~/.uca/alice --login --device-code --tenant <tenant-id>
+python scripts/call_as_user.py --az-config-dir ~/.uca/alice --calls chat --repeat 5 --brief
+```
 
 Two caveats for anyone repeating the load-balancing test. Weighted distribution is only meaningful
 when the primary is not throttling, so give the deployments enough capacity for the request rate

@@ -278,6 +278,20 @@ department and cost centre come from the `users` map; the user is attributed by 
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | Muazu Isah | AI Platform | CC-TEST | `azure-cli` | chat, embed | 3 | 65 | 100% | $0.0012 | $0.0012 |
 
+Then four people used the same application, each with a different mix of traffic, through
+[`scripts/call_as_user.py`](scripts/call_as_user.py) — which you can run to test the gateway as
+yourself. One application line splits into four, by person, department and cost centre:
+
+| Individual | Department | Cost centre | Application | Models | Requests | Tokens | Share of app | Estimated USD | Allocated USD |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Bob Test | Finance | CC-2002 | `azure-cli` | chat | 8 | 461 | 28.1% | $0.0105 | $0.0105 |
+| Muazu Isah | AI Platform | CC-TEST | `azure-cli` | chat, embed | 13 | 496 | 30.2% | $0.0104 | $0.0104 |
+| Alice Test | Claims | CC-1001 | `azure-cli` | chat, embed | 10 | 404 | 24.6% | $0.0083 | $0.0083 |
+| Carol Test | Research | CC-3003 | `azure-cli` | chat, embed | 8 | 281 | 17.1% | $0.0055 | $0.0055 |
+
+Bob used fewer tokens than Muazu but cost more, because all of his were chat completions; 100% of
+tokens were attributed to a person. Details in [validation §3b](docs/validation.md#3b-per-user-attribution).
+
 What this proves:
 
 - **Every request names both the application and the person.** The gateway returned
@@ -333,7 +347,7 @@ the primary began refusing work, and every one after it did:
 │   ├── 02-production-private/ Multi-region backends, private endpoints, WAF-ready
 │   └── 03-cost-attribution/   Layer 1 + Layer 2 with chargeback enabled
 ├── tests/                     Unit tests for the pricing meter matcher
-└── scripts/                   Pricing map generator, smoke test, policy render check
+└── scripts/                   Pricing map generator, smoke tests (incl. per-user), policy render check
 ```
 
 Workbook definitions live with the module that deploys them, in
